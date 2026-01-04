@@ -1,0 +1,59 @@
+# EROFS Snapshotter Configuration Example
+#
+# Copy this file to /etc/erofs-snapshotter/config.toml and modify as needed
+
+version = 1
+
+[snapshotter]
+# Root directory for snapshotter data (layer blobs, metadata)
+root = "/var/lib/erofs-snapshotter"
+
+# Unix socket address for gRPC server
+address = "/run/erofs-snapshotter/snapshotter.sock"
+
+# containerd socket for content store access
+containerd_address = "/run/containerd/containerd.sock"
+containerd_namespace = "default"
+
+[snapshotter.options]
+# Default writable layer size in bytes
+# 0 = directory mode (no block device, uses overlayfs upperdir)
+# >0 = block mode (uses ext4 loop mount for writable layer)
+# Block mode is useful for VM-based runtimes like qemubox
+# default_writable_size = "512M"
+default_writable_size = 0
+
+# Enable fsverity for layer integrity validation
+# Requires kernel 5.4+ and filesystem support
+enable_fsverity = false
+
+# Set IMMUTABLE_FL flag on committed layers
+# Prevents accidental modification of layer blobs
+set_immutable = true
+
+# Extra overlay mount options
+# Common options: index=off, metacopy=off, userxattr
+overlay_options = ["index=off", "metacopy=off"]
+
+# Maximum number of unmerged layers before triggering fsmerge
+# 0 = disabled (no layer merging)
+# >0 = merge layers when count exceeds this threshold
+# Requires mkfs.erofs with --aufs support
+max_unmerged_layers = 0
+
+[differ]
+# Extra mkfs.erofs options for layer conversion
+# Common options:
+#   -zlz4hc,12  = LZ4HC compression level 12
+#   -zzstd      = Zstandard compression
+#   -C65536     = Chunk size for inline data
+mkfs_options = ["-zlz4hc,12", "-C65536"]
+
+# Enable tar index mode for faster layer conversion
+# Requires erofs-utils 1.8+
+# Generates tar index instead of full EROFS conversion
+tar_index_mode = false
+
+[logging]
+# Log level: debug, info, warn, error
+level = "info"

@@ -1,0 +1,24 @@
+# containerd Configuration Example for EROFS Snapshotter
+#
+# Add this to your /etc/containerd/config.toml
+
+version = 2
+
+# Register the external EROFS snapshotter
+[proxy_plugins]
+  [proxy_plugins.erofs]
+    type = "snapshot"
+    address = "/run/erofs-snapshotter/snapshotter.sock"
+
+  [proxy_plugins.erofs-diff]
+    type = "diff"
+    address = "/run/erofs-snapshotter/snapshotter.sock"
+
+# Optional: Use EROFS as the default snapshotter for CRI
+[plugins."io.containerd.cri.v1.images"]
+  snapshotter = "erofs"
+
+# Optional: Configure the default runtime to use EROFS
+# [plugins."io.containerd.cri.v1.runtime"]
+#   [plugins."io.containerd.cri.v1.runtime".containerd]
+#     snapshotter = "erofs"

@@ -1,0 +1,28 @@
+[Unit]
+Description=EROFS Snapshotter for containerd
+Documentation=https://github.com/containerd/erofs-snapshotter
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/erofs-snapshotter \
+    --address /run/erofs-snapshotter/snapshotter.sock \
+    --root /var/lib/erofs-snapshotter \
+    --containerd-address /run/containerd/containerd.sock \
+    --log-level info
+Restart=always
+RestartSec=5
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+OOMScoreAdjust=-999
+
+# Security hardening
+NoNewPrivileges=false
+ProtectSystem=false
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
