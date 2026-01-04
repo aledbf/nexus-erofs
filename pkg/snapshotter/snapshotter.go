@@ -33,6 +33,7 @@ import (
 	"github.com/moby/sys/mountinfo"
 
 	"github.com/aledbf/nexuserofs/internal/fsverity"
+	"github.com/aledbf/nexuserofs/internal/stringutil"
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/snapshots/storage"
@@ -198,7 +199,10 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 	}, nil
 }
 
-// Close closes the snapshotter
+// Close releases all resources held by the snapshotter.
+// It closes the metadata store (BBolt database) but does not unmount
+// any active snapshots. This method is safe to call multiple times;
+// subsequent calls will return the same error (if any) from the first close.
 func (s *snapshotter) Close() error {
 	return s.ms.Close()
 }
@@ -251,7 +255,7 @@ func (s *snapshotter) createWritableLayer(ctx context.Context, id string) error 
 		"-E", "nodiscard,lazy_itable_init=1,lazy_journal_init=1", path)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		os.Remove(path)
-		return fmt.Errorf("failed to format ext4: %w: %s", err, truncateOutput(out, 256))
+		return fmt.Errorf("failed to format ext4: %w: %s", err, stringutil.TruncateOutput(out, 256))
 	}
 
 	log.G(ctx).WithField("path", path).WithField("size", size).Debug("created writable layer")
@@ -552,15 +556,6 @@ func (s *snapshotter) activeLayerMounts(snap storage.Snapshot, options []string)
 // so we use path.Base (POSIX paths) rather than filepath.Base (OS-specific).
 func isExtractKey(key string) bool {
 	return strings.HasPrefix(path.Base(key), snapshots.UnpackKeyPrefix)
-}
-
-// truncateOutput truncates command output to maxLen bytes for inclusion in error
-// messages. This prevents verbose tool output from overwhelming error logs.
-func truncateOutput(out []byte, maxLen int) string {
-	if len(out) <= maxLen {
-		return string(out)
-	}
-	return string(out[:maxLen]) + "... (truncated)"
 }
 
 // ensureMarkerFile creates the EROFS layer marker file at the given path if

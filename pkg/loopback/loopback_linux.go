@@ -21,6 +21,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/containerd/containerd/v2/core/mount"
@@ -28,10 +29,16 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-var forceloop bool
-
 // ErofsMountHandler handles mounting EROFS filesystems with loop device support.
-type ErofsMountHandler struct{}
+// It tracks whether file-backed mounts are supported by the kernel (Linux 6.12+)
+// and falls back to loop devices when necessary.
+type ErofsMountHandler struct {
+	// forceLoop tracks whether we should skip file-backed mount attempts.
+	// Once set to true (after receiving ENOTBLK), all subsequent mounts
+	// will use loop devices directly. This is an atomic bool to ensure
+	// thread-safe access from concurrent mount operations.
+	forceLoop atomic.Bool
+}
 
 // NewErofsMountHandler creates a new EROFS mount handler.
 func NewErofsMountHandler() *ErofsMountHandler {
@@ -58,7 +65,7 @@ func (h *ErofsMountHandler) Mount(ctx context.Context, m mount.Mount, mp string,
 	}
 
 	var err error = unix.ENOTBLK
-	if !forceloop {
+	if !h.forceLoop.Load() {
 		// Try to use file-backed mount feature if available (Linux 6.12+) first
 		err = m.Mount(mp)
 	}
@@ -66,7 +73,7 @@ func (h *ErofsMountHandler) Mount(ctx context.Context, m mount.Mount, mp string,
 		var loops []*os.File
 
 		// Never try to mount with raw files anymore if tried
-		forceloop = true
+		h.forceLoop.Store(true)
 		params := mount.LoopParams{
 			Readonly:  true,
 			Autoclear: true,

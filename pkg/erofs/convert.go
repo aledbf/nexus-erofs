@@ -29,6 +29,7 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 
+	"github.com/aledbf/nexuserofs/internal/stringutil"
 	"github.com/containerd/containerd/v2/core/mount"
 )
 
@@ -43,9 +44,9 @@ func ConvertTarErofs(ctx context.Context, r io.Reader, layerPath, uuid string, m
 	cmd.Stdin = r
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("erofs apply failed: %s: %w", out, err)
+		return fmt.Errorf("mkfs.erofs %v failed: %s: %w", args, stringutil.TruncateOutput(out, 256), err)
 	}
-	log.G(ctx).Infof("running %s %s %v", cmd.Path, cmd.Args, string(out))
+	log.G(ctx).Debugf("mkfs.erofs %v: %s", args, stringutil.TruncateOutput(out, 256))
 	return nil
 }
 
@@ -111,9 +112,9 @@ func ConvertErofs(ctx context.Context, layerPath string, srcDir string, mkfsExtr
 	cmd := exec.CommandContext(ctx, "mkfs.erofs", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("erofs apply failed: %s: %w", out, err)
+		return fmt.Errorf("mkfs.erofs %v failed: %s: %w", args, stringutil.TruncateOutput(out, 256), err)
 	}
-	log.G(ctx).Infof("running %s %s %v", cmd.Path, cmd.Args, string(out))
+	log.G(ctx).Debugf("mkfs.erofs %v: %s", args, stringutil.TruncateOutput(out, 256))
 	return nil
 }
 

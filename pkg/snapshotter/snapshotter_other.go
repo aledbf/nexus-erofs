@@ -24,9 +24,16 @@ import (
 	"github.com/containerd/errdefs"
 )
 
-// defaultWritableSize is the default size allocation for writable
-// layers on non-Linux platforms. This is set to 64MiB but may be
-// adjusted in the user configuration or per snapshot.
+// defaultWritableSize controls the default writable layer mode.
+//
+// On non-Linux platforms, this is set to 64 MiB to enable "block mode" -
+// an ext4 image file is created for the writable layer. This is required
+// because non-Linux systems typically lack native overlayfs support.
+//
+// The size can be adjusted via the WithDefaultSize option or per-snapshot
+// configuration. Set to 0 to use "directory mode" (Linux-only).
+//
+// See snapshotter_linux.go for the Linux default (0 = directory mode).
 const defaultWritableSize = 64 * 1024 * 1024
 
 func checkCompatibility(root string) error {

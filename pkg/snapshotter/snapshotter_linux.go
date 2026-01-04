@@ -33,8 +33,18 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 )
 
-// defaultWritableSize is set to 0 for Linux to match the default behavior of
-// other snapshotters available on Linux.
+// defaultWritableSize controls the default writable layer mode.
+//
+// On Linux, this is set to 0 which enables "directory mode" - the writable
+// layer uses a plain directory on the host filesystem. This matches the
+// default behavior of other Linux snapshotters and works with any filesystem
+// that supports overlayfs (ext4, xfs with d_type, etc.).
+//
+// When set to a non-zero value, "block mode" is used instead: an ext4 image
+// file of the specified size is created and loop-mounted for the writable
+// layer. Block mode is required on non-Linux platforms and optional on Linux.
+//
+// See snapshotter_other.go for the non-Linux default (64 MiB block mode).
 const defaultWritableSize = 0
 
 // check if EROFS kernel filesystem is registered or not

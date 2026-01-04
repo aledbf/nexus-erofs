@@ -38,8 +38,6 @@ import (
 	"github.com/google/uuid"
 )
 
-var emptyDesc = ocispec.Descriptor{}
-
 type differ interface {
 	diff.Applier
 	diff.Comparer
@@ -148,24 +146,24 @@ func (s erofsDiff) Apply(ctx context.Context, desc ocispec.Descriptor, mounts []
 	if isErofsMediaType(desc.MediaType) {
 		native = true
 	} else if _, err := images.DiffCompression(ctx, desc.MediaType); err != nil {
-		return emptyDesc, fmt.Errorf("currently unsupported media type: %s", desc.MediaType)
+		return ocispec.Descriptor{}, fmt.Errorf("currently unsupported media type: %s", desc.MediaType)
 	}
 
 	var config diff.ApplyConfig
 	for _, o := range opts {
 		if err := o(ctx, desc, &config); err != nil {
-			return emptyDesc, fmt.Errorf("failed to apply config opt: %w", err)
+			return ocispec.Descriptor{}, fmt.Errorf("failed to apply config opt: %w", err)
 		}
 	}
 
 	layer, err := erofsutils.MountsToLayer(mounts)
 	if err != nil {
-		return emptyDesc, err
+		return ocispec.Descriptor{}, err
 	}
 
 	ra, err := s.store.ReaderAt(ctx, desc)
 	if err != nil {
-		return emptyDesc, fmt.Errorf("failed to get reader from content store: %w", err)
+		return ocispec.Descriptor{}, fmt.Errorf("failed to get reader from content store: %w", err)
 	}
 	defer ra.Close()
 
@@ -173,12 +171,12 @@ func (s erofsDiff) Apply(ctx context.Context, desc ocispec.Descriptor, mounts []
 	if native {
 		f, err := os.Create(layerBlobPath)
 		if err != nil {
-			return emptyDesc, err
+			return ocispec.Descriptor{}, err
 		}
 		_, err = io.Copy(f, content.NewReader(ra))
 		f.Close()
 		if err != nil {
-			return emptyDesc, err
+			return ocispec.Descriptor{}, err
 		}
 		return desc, nil
 	}
@@ -186,7 +184,7 @@ func (s erofsDiff) Apply(ctx context.Context, desc ocispec.Descriptor, mounts []
 	processor := diff.NewProcessorChain(desc.MediaType, content.NewReader(ra))
 	for {
 		if processor, err = diff.GetProcessor(ctx, processor, config.ProcessorPayloads); err != nil {
-			return emptyDesc, fmt.Errorf("failed to get stream processor for %s: %w", desc.MediaType, err)
+			return ocispec.Descriptor{}, fmt.Errorf("failed to get stream processor for %s: %w", desc.MediaType, err)
 		}
 		if processor.MediaType() == ocispec.MediaTypeImageLayer {
 			break
@@ -204,7 +202,7 @@ func (s erofsDiff) Apply(ctx context.Context, desc ocispec.Descriptor, mounts []
 		// Use the tar index method: generate tar index and append tar
 		err = erofsutils.GenerateTarIndexAndAppendTar(ctx, rc, layerBlobPath, s.mkfsExtraOpts)
 		if err != nil {
-			return emptyDesc, fmt.Errorf("failed to generate tar index: %w", err)
+			return ocispec.Descriptor{}, fmt.Errorf("failed to generate tar index: %w", err)
 		}
 		log.G(ctx).WithField("path", layerBlobPath).Debug("Applied layer using tar index mode")
 	} else {
@@ -212,31 +210,32 @@ func (s erofsDiff) Apply(ctx context.Context, desc ocispec.Descriptor, mounts []
 		u := uuid.NewSHA1(uuid.NameSpaceURL, []byte("erofs:blobs/"+desc.Digest))
 		err = erofsutils.ConvertTarErofs(ctx, rc, layerBlobPath, u.String(), s.mkfsExtraOpts)
 		if err != nil {
-			return emptyDesc, fmt.Errorf("failed to convert tar to erofs: %w", err)
+			return ocispec.Descriptor{}, fmt.Errorf("failed to convert tar to erofs: %w", err)
 		}
 		log.G(ctx).WithField("path", layerBlobPath).Debug("Applied layer using tar conversion mode")
 	}
 
 	// Read any trailing data
 	if _, err := io.Copy(io.Discard, rc); err != nil {
-		return emptyDesc, err
+		return ocispec.Descriptor{}, err
 	}
 
 	return ocispec.Descriptor{
 		MediaType: ocispec.MediaTypeImageLayer,
-		Size:      rc.c,
+		Size:      rc.count,
 		Digest:    digester.Digest(),
 	}, nil
 }
 
+// readCounter wraps an io.Reader and counts the total bytes read.
 type readCounter struct {
-	r io.Reader
-	c int64
+	r     io.Reader
+	count int64
 }
 
 func (rc *readCounter) Read(p []byte) (n int, err error) {
 	n, err = rc.r.Read(p)
-	rc.c += int64(n)
+	rc.count += int64(n)
 	return
 }
 

@@ -97,7 +97,7 @@ func (s erofsDiff) Compare(ctx context.Context, lower, upper []mount.Mount, opts
 	var config diff.Config
 	for _, opt := range opts {
 		if err := opt(&config); err != nil {
-			return emptyDesc, err
+			return ocispec.Descriptor{}, err
 		}
 	}
 	if tm := epoch.FromContext(ctx); tm != nil && config.SourceDateEpoch == nil {
@@ -123,7 +123,7 @@ func (s erofsDiff) Compare(ctx context.Context, lower, upper []mount.Mount, opts
 	// For direct overlay diff, resolve the layer path from mounts.
 	layer, err := erofsutils.MountsToLayer(upper)
 	if err != nil {
-		return emptyDesc, fmt.Errorf("unsupported layer for erofsDiff Compare method: %w", err)
+		return ocispec.Descriptor{}, fmt.Errorf("unsupported layer for erofsDiff Compare method: %w", err)
 	}
 
 	upperRoot := filepath.Join(layer, "fs")
@@ -144,7 +144,7 @@ func (s erofsDiff) writeAndCommitDiff(ctx context.Context, config diff.Config, w
 	case ocispec.MediaTypeImageLayerZstd:
 		compressionType = compression.Zstd
 	default:
-		return emptyDesc, fmt.Errorf("unsupported diff media type: %v: %w", config.MediaType, errdefs.ErrNotImplemented)
+		return ocispec.Descriptor{}, fmt.Errorf("unsupported diff media type: %v: %w", config.MediaType, errdefs.ErrNotImplemented)
 	}
 
 	var newReference bool
@@ -159,7 +159,7 @@ func (s erofsDiff) writeAndCommitDiff(ctx context.Context, config diff.Config, w
 			MediaType: config.MediaType,
 		}))
 	if err != nil {
-		return emptyDesc, fmt.Errorf("failed to open writer: %w", err)
+		return ocispec.Descriptor{}, fmt.Errorf("failed to open writer: %w", err)
 	}
 
 	// errOpen is set when an error occurs while the content writer has not been
@@ -177,7 +177,7 @@ func (s erofsDiff) writeAndCommitDiff(ctx context.Context, config diff.Config, w
 	}()
 	if !newReference {
 		if errOpen = cw.Truncate(0); errOpen != nil {
-			return emptyDesc, errOpen
+			return ocispec.Descriptor{}, errOpen
 		}
 	}
 
@@ -187,18 +187,18 @@ func (s erofsDiff) writeAndCommitDiff(ctx context.Context, config diff.Config, w
 		if config.Compressor != nil {
 			compressed, errOpen = config.Compressor(cw, config.MediaType)
 			if errOpen != nil {
-				return emptyDesc, fmt.Errorf("failed to get compressed stream: %w", errOpen)
+				return ocispec.Descriptor{}, fmt.Errorf("failed to get compressed stream: %w", errOpen)
 			}
 		} else {
 			compressed, errOpen = compression.CompressStream(cw, compressionType)
 			if errOpen != nil {
-				return emptyDesc, fmt.Errorf("failed to get compressed stream: %w", errOpen)
+				return ocispec.Descriptor{}, fmt.Errorf("failed to get compressed stream: %w", errOpen)
 			}
 		}
 		errOpen = writeFn(ctx, io.MultiWriter(compressed, dgstr.Hash()))
 		compressed.Close()
 		if errOpen != nil {
-			return emptyDesc, fmt.Errorf("failed to write compressed diff: %w", errOpen)
+			return ocispec.Descriptor{}, fmt.Errorf("failed to write compressed diff: %w", errOpen)
 		}
 
 		if config.Labels == nil {
@@ -207,7 +207,7 @@ func (s erofsDiff) writeAndCommitDiff(ctx context.Context, config diff.Config, w
 		config.Labels[labels.LabelUncompressed] = dgstr.Digest().String()
 	} else {
 		if errOpen = writeFn(ctx, cw); errOpen != nil {
-			return emptyDesc, fmt.Errorf("failed to write diff: %w", errOpen)
+			return ocispec.Descriptor{}, fmt.Errorf("failed to write diff: %w", errOpen)
 		}
 	}
 
@@ -219,14 +219,14 @@ func (s erofsDiff) writeAndCommitDiff(ctx context.Context, config diff.Config, w
 	dgst := cw.Digest()
 	if errOpen = cw.Commit(ctx, 0, dgst, commitopts...); errOpen != nil {
 		if !errdefs.IsAlreadyExists(errOpen) {
-			return emptyDesc, fmt.Errorf("failed to commit: %w", errOpen)
+			return ocispec.Descriptor{}, fmt.Errorf("failed to commit: %w", errOpen)
 		}
 		errOpen = nil
 	}
 
 	info, err := s.store.Info(ctx, dgst)
 	if err != nil {
-		return emptyDesc, fmt.Errorf("failed to get info from content store: %w", err)
+		return ocispec.Descriptor{}, fmt.Errorf("failed to get info from content store: %w", err)
 	}
 	if info.Labels == nil {
 		info.Labels = make(map[string]string)
@@ -235,7 +235,7 @@ func (s erofsDiff) writeAndCommitDiff(ctx context.Context, config diff.Config, w
 	if _, ok := info.Labels[labels.LabelUncompressed]; !ok {
 		info.Labels[labels.LabelUncompressed] = config.Labels[labels.LabelUncompressed]
 		if _, err := s.store.Update(ctx, info, "labels."+labels.LabelUncompressed); err != nil {
-			return emptyDesc, fmt.Errorf("error setting uncompressed label: %w", err)
+			return ocispec.Descriptor{}, fmt.Errorf("error setting uncompressed label: %w", err)
 		}
 	}
 
