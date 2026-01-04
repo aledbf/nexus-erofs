@@ -1,6 +1,11 @@
 package stringutil
 
-import "testing"
+import (
+	"testing"
+
+	// Import testutil to register the -test.root flag
+	_ "github.com/aledbf/nexuserofs/internal/testutil"
+)
 
 func TestTruncateOutput(t *testing.T) {
 	tests := []struct {

@@ -4,6 +4,9 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	// Import testutil to register the -test.root flag
+	_ "github.com/aledbf/nexuserofs/internal/testutil"
 )
 
 func TestDo(t *testing.T) {

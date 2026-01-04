@@ -6,6 +6,9 @@ import (
 
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/errdefs"
+
+	// Import testutil to register the -test.root flag
+	_ "github.com/aledbf/nexuserofs/internal/testutil"
 )
 
 func TestNewNamespaceAwareStore(t *testing.T) {

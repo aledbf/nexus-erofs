@@ -9,6 +9,9 @@ import (
 	"testing"
 
 	"github.com/containerd/containerd/v2/core/mount"
+
+	// Import testutil to register the -test.root flag
+	_ "github.com/aledbf/nexuserofs/internal/testutil"
 )
 
 func TestNewErofsDiffer(t *testing.T) {
