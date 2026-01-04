@@ -9,8 +9,44 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  build-erofs:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Build erofs-utils in Docker
+        run: |
+          mkdir -p dist
+          docker run --rm --platform linux/${{ matrix.arch }} \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            ubuntu:25.04 bash -c '
+              set -ex
+              chmod +x ./scripts/build-erofs-utils.sh
+              ./scripts/build-erofs-utils.sh /workspace/erofs-bin
+              cp /workspace/erofs-bin/bin/mkfs.erofs /workspace/dist/mkfs.erofs-linux-${{ matrix.arch }}
+              cp /workspace/erofs-bin/bin/fsck.erofs /workspace/dist/fsck.erofs-linux-${{ matrix.arch }}
+              cp /workspace/erofs-bin/bin/dump.erofs /workspace/dist/dump.erofs-linux-${{ matrix.arch }}
+            '
+
+      - name: Upload erofs artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: erofs-utils-linux-${{ matrix.arch }}
+          path: dist/*
+
+  build-snapshotter:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,14 +63,39 @@ jobs:
         id: version
         run: echo "version=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
 
-      - name: Build binaries
+      - name: Build snapshotter
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
         run: |
-          for arch in amd64 arm64; do
-            GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build -trimpath \
-              -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }} -X main.commit=${{ github.sha }}" \
-              -o dist/nexuserofs-snapshotter-linux-$arch \
-              ./cmd/nexuserofs-snapshotter
-          done
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }} -X main.commit=${{ github.sha }}" \
+            -o dist/nexuserofs-snapshotter-linux-${{ matrix.arch }} \
+            ./cmd/nexuserofs-snapshotter
+
+      - name: Upload snapshotter artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexuserofs-snapshotter-linux-${{ matrix.arch }}
+          path: dist/*
+
+  release:
+    needs: [build-erofs, build-snapshotter]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Prepare release files
+        run: |
+          mkdir -p dist
+          mv artifacts/* dist/ || true
+          ls -la dist/
 
       - name: Create checksums
         working-directory: dist
@@ -45,5 +106,4 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            dist/nexuserofs-snapshotter-*
-            dist/checksums.txt
+            dist/*
