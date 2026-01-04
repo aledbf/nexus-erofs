@@ -40,9 +40,9 @@ func ConvertTarErofs(ctx context.Context, r io.Reader, layerPath, uuid string, m
 	if uuid != "" {
 		args = append(args, []string{"-U", uuid}...)
 	}
-	// mkfs.erofs --tar=f expects: OUTPUT TARFILE
-	// Use "-" as TARFILE to read from stdin
-	args = append(args, layerPath, "-")
+	// mkfs.erofs --tar=f expects: FILE [SOURCE]
+	// When SOURCE is omitted, mkfs.erofs reads from stdin automatically
+	args = append(args, layerPath)
 	cmd := exec.CommandContext(ctx, "mkfs.erofs", args...)
 	cmd.Stdin = r
 	out, err := cmd.CombinedOutput()
@@ -72,10 +72,10 @@ func GenerateTarIndexAndAppendTar(ctx context.Context, r io.Reader, layerPath st
 	teeReader := io.TeeReader(r, tarFile)
 
 	// Generate tar index directly to layerPath using --tar=i option
-	// mkfs.erofs --tar=i expects: OUTPUT TARFILE
-	// Use "-" as TARFILE to read from stdin
+	// mkfs.erofs --tar=i expects: FILE [SOURCE]
+	// When SOURCE is omitted, mkfs.erofs reads from stdin automatically
 	args := append([]string{"--tar=i", "--aufs", "--quiet"}, mkfsExtraOpts...)
-	args = append(args, layerPath, "-")
+	args = append(args, layerPath)
 	cmd := exec.CommandContext(ctx, "mkfs.erofs", args...)
 	cmd.Stdin = teeReader
 	out, err := cmd.CombinedOutput()
