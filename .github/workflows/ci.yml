@@ -41,10 +41,31 @@ jobs:
       - name: Download Go modules
         run: go mod download
 
-      - name: Install system dependencies
+      - name: Cache erofs-utils
+        id: cache-erofs
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/erofs-utils
+          key: erofs-utils-1.8.10-amd64-v1
+
+      - name: Build erofs-utils in Docker
+        if: steps.cache-erofs.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y erofs-utils
+          mkdir -p ~/.local/erofs-utils
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace \
+            -v ~/.local/erofs-utils:/output \
+            -w /workspace \
+            ubuntu:25.04 bash -c '
+              set -ex
+              chmod +x ./scripts/build-erofs-utils.sh
+              ./scripts/build-erofs-utils.sh /output
+            '
+
+      - name: Install erofs-utils
+        run: |
+          sudo cp ~/.local/erofs-utils/bin/* /usr/local/bin/
+          mkfs.erofs --version
 
       - name: Load EROFS kernel module
         run: sudo modprobe erofs || true
