@@ -38,7 +38,10 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install dependencies
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y erofs-utils
@@ -73,6 +76,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Download Go modules
+        run: go mod download
 
       - name: Build
         env:

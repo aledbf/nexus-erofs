@@ -1,4 +1,4 @@
-# nexuserofs
+# Nexus EROFS
 
 External snapshotter plugin for containerd that leverages EROFS (Enhanced Read-Only File System) for container image layers.
 
@@ -16,7 +16,7 @@ flowchart LR
         PP[Proxy Plugins]
     end
 
-    subgraph erofs-snapshotter
+    subgraph nexuserofs-snapshotter
         SS[SnapshotsServer]
         DS[DiffServer]
     end
@@ -58,12 +58,9 @@ task build-linux
 
 ```bash
 # Start the snapshotter daemon
-sudo ./bin/erofs-snapshotter --config /etc/erofs-snapshotter/config.toml
-
-# Or with flags
-sudo ./bin/erofs-snapshotter \
-  --root /var/lib/erofs-snapshotter \
-  --address /run/erofs-snapshotter/snapshotter.sock \
+sudo ./bin/nexuserofs-snapshotter \
+  --root /var/lib/nexuserofs-snapshotter \
+  --address /run/nexuserofs-snapshotter/snapshotter.sock \
   --containerd-address /run/containerd/containerd.sock
 ```
 
@@ -76,71 +73,74 @@ sudo ./bin/erofs-snapshotter \
 version = 2
 
 [proxy_plugins]
-  [proxy_plugins.erofs]
+  [proxy_plugins.nexuserofs]
     type = "snapshot"
-    address = "/run/erofs-snapshotter/snapshotter.sock"
+    address = "/run/nexuserofs-snapshotter/snapshotter.sock"
 
-  [proxy_plugins.erofs-diff]
+  [proxy_plugins.nexuserofs-diff]
     type = "diff"
-    address = "/run/erofs-snapshotter/snapshotter.sock"
+    address = "/run/nexuserofs-snapshotter/snapshotter.sock"
 
 # Use as default snapshotter
 [plugins."io.containerd.cri.v1.images"]
-  snapshotter = "erofs"
+  snapshotter = "nexuserofs"
 ```
 
 ### Snapshotter
 
-```toml
-# /etc/erofs-snapshotter/config.toml
-version = 1
+The snapshotter is configured via command-line flags:
 
-[snapshotter]
-root = "/var/lib/erofs-snapshotter"
-address = "/run/erofs-snapshotter/snapshotter.sock"
-
-# Connect to containerd for content store access
-containerd_address = "/run/containerd/containerd.sock"
-containerd_namespace = "default"
-
-[snapshotter.options]
-# Default writable layer size (0 = directory mode, >0 = block mode)
-# Block mode uses ext4 loop mounts for writable layers
-default_writable_size = "512M"
-
-# Enable fsverity for layer integrity validation
-enable_fsverity = false
-
-# Set immutable flag on committed layers
-set_immutable = true
-
-# Extra overlay mount options
-overlay_options = ["index=off", "metacopy=off"]
-
-# Max layers before triggering fsmerge (0 = disabled)
-max_unmerged_layers = 0
-
-[differ]
-# Extra mkfs.erofs options
-mkfs_options = ["-zlz4hc,12", "-C65536"]
-
-# Enable tar index mode (faster apply, requires erofs-utils 1.8+)
-tar_index_mode = false
+```bash
+sudo ./bin/nexuserofs-snapshotter \
+  --root /var/lib/nexuserofs-snapshotter \
+  --address /run/nexuserofs-snapshotter/snapshotter.sock \
+  --containerd-address /run/containerd/containerd.sock \
+  --containerd-namespace default \
+  --log-level info \
+  --default-size 0 \
+  --enable-fsverity=false \
+  --set-immutable \
+  --tar-index-mode=false \
+  --mkfs-options="-zlz4hc,12" \
+  --mkfs-options="-C65536" \
+  --overlay-options="index=off" \
+  --overlay-options="metacopy=off"
 ```
+
+Available flags:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--root`, `-r` | `/var/lib/nexuserofs-snapshotter` | Root directory for snapshotter data |
+| `--address`, `-a` | `/run/nexuserofs-snapshotter/snapshotter.sock` | Unix socket address |
+| `--containerd-address` | `/run/containerd/containerd.sock` | containerd socket for content store |
+| `--containerd-namespace` | `default` | containerd namespace |
+| `--log-level` | `info` | Log level (debug, info, warn, error) |
+| `--default-size` | `0` | Default writable layer size in bytes (0 = directory mode) |
+| `--enable-fsverity` | `false` | Enable fsverity for layer validation |
+| `--set-immutable` | `true` | Set immutable flag on committed layers |
+| `--tar-index-mode` | `false` | Use tar index mode (requires erofs-utils 1.8+) |
+| `--mkfs-options` | | Extra options for mkfs.erofs |
+| `--overlay-options` | | Extra options for overlay mounts |
+
+See `config/config.toml.example` for a reference configuration format.
 
 ## Project Structure
 
 ```
 nexuserofs/
-├── cmd/erofs-snapshotter/    # Entry point, gRPC server setup
+├── cmd/nexuserofs-snapshotter/    # Entry point, gRPC server setup
 ├── pkg/
 │   ├── snapshotter/          # Core snapshotter implementation
 │   ├── differ/               # EROFS differ implementation
-│   └── erofs/                # mkfs.erofs wrapper, mount handling
+│   ├── erofs/                # mkfs.erofs wrapper, mount handling
+│   └── loopback/             # Loop device management
 ├── internal/
+│   ├── cleanup/              # Cleanup utilities
 │   ├── fsverity/             # fsverity support
 │   ├── mountutils/           # Mount utilities
-│   └── cleanup/              # Cleanup utilities
+│   ├── storage/              # Storage utilities
+│   └── testutil/             # Test utilities
 └── config/                   # Example configuration files
 ```
 

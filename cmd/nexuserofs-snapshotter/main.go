@@ -39,14 +39,14 @@ import (
 )
 
 const (
-	defaultAddress          = "/run/erofs-snapshotter/snapshotter.sock"
-	defaultRoot             = "/var/lib/erofs-snapshotter"
+	defaultAddress          = "/run/nexuserofs-snapshotter/snapshotter.sock"
+	defaultRoot             = "/var/lib/nexuserofs-snapshotter"
 	defaultContainerdSocket = "/run/containerd/containerd.sock"
 )
 
 func main() {
 	app := &cli.App{
-		Name:  "erofs-snapshotter",
+		Name:  "nexuserofs-snapshotter",
 		Usage: "External EROFS snapshotter for containerd",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
@@ -54,14 +54,14 @@ func main() {
 				Aliases: []string{"a"},
 				Usage:   "Address for the snapshotter socket",
 				Value:   defaultAddress,
-				EnvVars: []string{"EROFS_SNAPSHOTTER_ADDRESS"},
+				EnvVars: []string{"NEXUSEROFS_SNAPSHOTTER_ADDRESS"},
 			},
 			&cli.StringFlag{
 				Name:    "root",
 				Aliases: []string{"r"},
 				Usage:   "Root directory for snapshotter data",
 				Value:   defaultRoot,
-				EnvVars: []string{"EROFS_SNAPSHOTTER_ROOT"},
+				EnvVars: []string{"NEXUSEROFS_SNAPSHOTTER_ROOT"},
 			},
 			&cli.StringFlag{
 				Name:    "containerd-address",
@@ -85,35 +85,35 @@ func main() {
 				Name:    "default-size",
 				Usage:   "Default writable layer size in bytes (0 = directory mode)",
 				Value:   0,
-				EnvVars: []string{"EROFS_DEFAULT_SIZE"},
+				EnvVars: []string{"NEXUSEROFS_DEFAULT_SIZE"},
 			},
 			&cli.BoolFlag{
 				Name:    "enable-fsverity",
 				Usage:   "Enable fsverity for layer validation",
 				Value:   false,
-				EnvVars: []string{"EROFS_ENABLE_FSVERITY"},
+				EnvVars: []string{"NEXUSEROFS_ENABLE_FSVERITY"},
 			},
 			&cli.BoolFlag{
 				Name:    "set-immutable",
 				Usage:   "Set immutable flag on committed layers",
 				Value:   true,
-				EnvVars: []string{"EROFS_SET_IMMUTABLE"},
+				EnvVars: []string{"NEXUSEROFS_SET_IMMUTABLE"},
 			},
 			&cli.BoolFlag{
 				Name:    "tar-index-mode",
 				Usage:   "Use tar index mode for layer conversion (requires erofs-utils 1.8+)",
 				Value:   false,
-				EnvVars: []string{"EROFS_TAR_INDEX_MODE"},
+				EnvVars: []string{"NEXUSEROFS_TAR_INDEX_MODE"},
 			},
 			&cli.StringSliceFlag{
 				Name:    "mkfs-options",
 				Usage:   "Extra options for mkfs.erofs",
-				EnvVars: []string{"EROFS_MKFS_OPTIONS"},
+				EnvVars: []string{"NEXUSEROFS_MKFS_OPTIONS"},
 			},
 			&cli.StringSliceFlag{
 				Name:    "overlay-options",
 				Usage:   "Extra options for overlay mounts",
-				EnvVars: []string{"EROFS_OVERLAY_OPTIONS"},
+				EnvVars: []string{"NEXUSEROFS_OVERLAY_OPTIONS"},
 			},
 		},
 		Action: run,

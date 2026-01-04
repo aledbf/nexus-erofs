@@ -1,13 +1,13 @@
 [Unit]
-Description=EROFS Snapshotter for containerd
+Description=Nexus EROFS Snapshotter for containerd
 Documentation=https://github.com/aledbf/nexuserofs
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/erofs-snapshotter \
-    --address /run/erofs-snapshotter/snapshotter.sock \
-    --root /var/lib/erofs-snapshotter \
+ExecStart=/usr/local/bin/nexuserofs-snapshotter \
+    --address /run/nexuserofs-snapshotter/snapshotter.sock \
+    --root /var/lib/nexuserofs-snapshotter \
     --containerd-address /run/containerd/containerd.sock \
     --log-level info
 Restart=always

@@ -1,15 +1,15 @@
-# EROFS Snapshotter Configuration Example
+# Nexus EROFS Snapshotter Configuration Example
 #
-# Copy this file to /etc/erofs-snapshotter/config.toml and modify as needed
+# Copy this file to /etc/nexuserofs-snapshotter/config.toml and modify as needed
 
 version = 1
 
 [snapshotter]
 # Root directory for snapshotter data (layer blobs, metadata)
-root = "/var/lib/erofs-snapshotter"
+root = "/var/lib/nexuserofs-snapshotter"
 
 # Unix socket address for gRPC server
-address = "/run/erofs-snapshotter/snapshotter.sock"
+address = "/run/nexuserofs-snapshotter/snapshotter.sock"
 
 # containerd socket for content store access
 containerd_address = "/run/containerd/containerd.sock"
