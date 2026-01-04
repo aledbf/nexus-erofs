@@ -305,28 +305,28 @@ func TestBuildTarErofsArgs(t *testing.T) {
 			layerPath:     "/path/to/layer.erofs",
 			uuid:          "",
 			mkfsExtraOpts: nil,
-			wantArgs:      []string{"--tar=f", "--aufs", "--quiet", "-Enoinline_data", "/path/to/layer.erofs", "-"},
+			wantArgs:      []string{"--tar=f", "--aufs", "--quiet", "-Enoinline_data", "/path/to/layer.erofs"},
 		},
 		{
 			name:          "with uuid",
 			layerPath:     "/path/to/layer.erofs",
-			uuid:          "test-uuid-1234",
+			uuid:          "550e8400-e29b-41d4-a716-446655440000",
 			mkfsExtraOpts: nil,
-			wantArgs:      []string{"--tar=f", "--aufs", "--quiet", "-Enoinline_data", "-U", "test-uuid-1234", "/path/to/layer.erofs", "-"},
+			wantArgs:      []string{"--tar=f", "--aufs", "--quiet", "-Enoinline_data", "-U", "550e8400-e29b-41d4-a716-446655440000", "/path/to/layer.erofs"},
 		},
 		{
 			name:          "with extra options",
 			layerPath:     "/path/to/layer.erofs",
 			uuid:          "",
 			mkfsExtraOpts: []string{"-zlz4hc", "-C65536"},
-			wantArgs:      []string{"--tar=f", "--aufs", "--quiet", "-Enoinline_data", "-zlz4hc", "-C65536", "/path/to/layer.erofs", "-"},
+			wantArgs:      []string{"--tar=f", "--aufs", "--quiet", "-Enoinline_data", "-zlz4hc", "-C65536", "/path/to/layer.erofs"},
 		},
 		{
 			name:          "with uuid and extra options",
 			layerPath:     "/path/to/layer.erofs",
-			uuid:          "abc-123",
+			uuid:          "550e8400-e29b-41d4-a716-446655440000",
 			mkfsExtraOpts: []string{"-zlz4hc", "12", "-C65536"},
-			wantArgs:      []string{"--tar=f", "--aufs", "--quiet", "-Enoinline_data", "-zlz4hc", "12", "-C65536", "-U", "abc-123", "/path/to/layer.erofs", "-"},
+			wantArgs:      []string{"--tar=f", "--aufs", "--quiet", "-Enoinline_data", "-zlz4hc", "12", "-C65536", "-U", "550e8400-e29b-41d4-a716-446655440000", "/path/to/layer.erofs"},
 		},
 	}
 
@@ -345,14 +345,9 @@ func TestBuildTarErofsArgs(t *testing.T) {
 				}
 			}
 
-			// Critical check: last argument must be "-" to force stdin
-			if got[len(got)-1] != "-" {
-				t.Errorf("last argument must be '-' to force stdin reading, got %q", got[len(got)-1])
-			}
-
-			// Critical check: second-to-last argument must be the layer path
-			if got[len(got)-2] != tc.layerPath {
-				t.Errorf("second-to-last argument must be layer path %q, got %q", tc.layerPath, got[len(got)-2])
+			// Critical check: last argument must be the layer path (mkfs.erofs reads from stdin automatically)
+			if got[len(got)-1] != tc.layerPath {
+				t.Errorf("last argument must be layer path %q, got %q", tc.layerPath, got[len(got)-1])
 			}
 		})
 	}
@@ -369,13 +364,13 @@ func TestBuildTarIndexArgs(t *testing.T) {
 			name:          "basic",
 			layerPath:     "/path/to/layer.erofs",
 			mkfsExtraOpts: nil,
-			wantArgs:      []string{"--tar=i", "--aufs", "--quiet", "/path/to/layer.erofs", "-"},
+			wantArgs:      []string{"--tar=i", "--aufs", "--quiet", "/path/to/layer.erofs"},
 		},
 		{
 			name:          "with extra options",
 			layerPath:     "/path/to/layer.erofs",
 			mkfsExtraOpts: []string{"-zlz4hc", "-C65536"},
-			wantArgs:      []string{"--tar=i", "--aufs", "--quiet", "-zlz4hc", "-C65536", "/path/to/layer.erofs", "-"},
+			wantArgs:      []string{"--tar=i", "--aufs", "--quiet", "-zlz4hc", "-C65536", "/path/to/layer.erofs"},
 		},
 	}
 
@@ -394,53 +389,41 @@ func TestBuildTarIndexArgs(t *testing.T) {
 				}
 			}
 
-			// Critical check: last argument must be "-" to force stdin
-			if got[len(got)-1] != "-" {
-				t.Errorf("last argument must be '-' to force stdin reading, got %q", got[len(got)-1])
-			}
-
-			// Critical check: second-to-last argument must be the layer path
-			if got[len(got)-2] != tc.layerPath {
-				t.Errorf("second-to-last argument must be layer path %q, got %q", tc.layerPath, got[len(got)-2])
+			// Critical check: last argument must be the layer path (mkfs.erofs reads from stdin automatically)
+			if got[len(got)-1] != tc.layerPath {
+				t.Errorf("last argument must be layer path %q, got %q", tc.layerPath, got[len(got)-1])
 			}
 		})
 	}
 }
 
-// TestStdinArgumentIsPresent verifies that both tar conversion functions
-// include the explicit "-" argument to read from stdin. This is critical
-// because without it, mkfs.erofs 1.8+ may fall back to using the output
-// file as the tar input source, causing "failed to open tar file" errors.
-func TestStdinArgumentIsPresent(t *testing.T) {
-	t.Run("ConvertTarErofs args end with stdin marker", func(t *testing.T) {
-		args := buildTarErofsArgs("/any/path.erofs", "some-uuid", []string{"-z", "lz4"})
+// TestArgsEndWithLayerPath verifies that both tar conversion functions
+// end with the layer path as the last argument. mkfs.erofs reads from
+// stdin automatically when no SOURCE is specified after FILE.
+func TestArgsEndWithLayerPath(t *testing.T) {
+	t.Run("ConvertTarErofs args end with layer path", func(t *testing.T) {
+		args := buildTarErofsArgs("/any/path.erofs", "550e8400-e29b-41d4-a716-446655440000", []string{"-z", "lz4"})
 
-		if len(args) < 2 {
+		if len(args) < 1 {
 			t.Fatal("args too short")
 		}
 
-		// The pattern must be: ... FILE -
-		if args[len(args)-1] != "-" {
-			t.Errorf("stdin marker '-' must be the last argument, got args: %v", args)
-		}
-		if args[len(args)-2] != "/any/path.erofs" {
-			t.Errorf("output file must be second-to-last, got args: %v", args)
+		// The last argument must be the output file path
+		if args[len(args)-1] != "/any/path.erofs" {
+			t.Errorf("output file must be the last argument, got args: %v", args)
 		}
 	})
 
-	t.Run("GenerateTarIndex args end with stdin marker", func(t *testing.T) {
+	t.Run("GenerateTarIndex args end with layer path", func(t *testing.T) {
 		args := buildTarIndexArgs("/any/path.erofs", []string{"-z", "lz4"})
 
-		if len(args) < 2 {
+		if len(args) < 1 {
 			t.Fatal("args too short")
 		}
 
-		// The pattern must be: ... FILE -
-		if args[len(args)-1] != "-" {
-			t.Errorf("stdin marker '-' must be the last argument, got args: %v", args)
-		}
-		if args[len(args)-2] != "/any/path.erofs" {
-			t.Errorf("output file must be second-to-last, got args: %v", args)
+		// The last argument must be the output file path
+		if args[len(args)-1] != "/any/path.erofs" {
+			t.Errorf("output file must be the last argument, got args: %v", args)
 		}
 	})
 }
@@ -515,7 +498,7 @@ func TestConvertTarErofsIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	err := ConvertTarErofs(ctx, tarBuf, layerPath, "test-uuid", nil)
+	err := ConvertTarErofs(ctx, tarBuf, layerPath, "550e8400-e29b-41d4-a716-446655440000", nil)
 	if err != nil {
 		t.Fatalf("ConvertTarErofs failed: %v", err)
 	}

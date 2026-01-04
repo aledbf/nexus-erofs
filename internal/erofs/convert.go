@@ -64,13 +64,11 @@ func ConvertTarErofs(ctx context.Context, r io.Reader, layerPath, uuid string, m
 // buildTarIndexArgs constructs the command-line arguments for mkfs.erofs
 // when generating a tar index.
 //
-// The arguments follow the pattern: --tar=i --aufs --quiet [extraOpts] FILE -
-// The trailing "-" is critical: it explicitly tells mkfs.erofs to read from stdin.
+// The arguments follow the pattern: --tar=i --aufs --quiet [extraOpts] FILE
+// When no SOURCE is specified after FILE, mkfs.erofs reads from stdin automatically.
 func buildTarIndexArgs(layerPath string, mkfsExtraOpts []string) []string {
 	args := append([]string{"--tar=i", "--aufs", "--quiet"}, mkfsExtraOpts...)
-	// mkfs.erofs --tar=i expects: FILE [SOURCE]
-	// Pass "-" as SOURCE to explicitly read from stdin.
-	args = append(args, layerPath, "-")
+	args = append(args, layerPath)
 	return args
 }
 
