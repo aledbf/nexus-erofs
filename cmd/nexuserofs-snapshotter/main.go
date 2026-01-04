@@ -25,17 +25,17 @@ import (
 	"path/filepath"
 	"syscall"
 
-	snapshotsapi "github.com/containerd/containerd/api/services/snapshots/v1"
 	diffapi "github.com/containerd/containerd/api/services/diff/v1"
-	"github.com/containerd/containerd/v2/contrib/snapshotservice"
-	"github.com/containerd/containerd/v2/contrib/diffservice"
+	snapshotsapi "github.com/containerd/containerd/api/services/snapshots/v1"
 	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/contrib/diffservice"
+	"github.com/containerd/containerd/v2/contrib/snapshotservice"
 	"github.com/containerd/log"
 	"github.com/urfave/cli/v2"
 	"google.golang.org/grpc"
 
-	snapshotter "github.com/aledbf/nexuserofs/pkg/snapshotter"
 	differ "github.com/aledbf/nexuserofs/pkg/differ"
+	snapshotter "github.com/aledbf/nexuserofs/pkg/snapshotter"
 )
 
 const (

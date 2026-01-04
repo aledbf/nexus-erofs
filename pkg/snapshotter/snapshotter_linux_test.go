@@ -41,7 +41,6 @@ package erofs
 import (
 	"archive/tar"
 	"context"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -50,6 +49,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aledbf/nexuserofs/internal/fsverity"
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
@@ -58,7 +58,6 @@ import (
 	"github.com/containerd/containerd/v2/pkg/archive/compression"
 	"github.com/containerd/containerd/v2/pkg/archive/tartest"
 	"github.com/containerd/containerd/v2/pkg/testutil"
-	"github.com/aledbf/nexuserofs/internal/fsverity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -84,37 +83,6 @@ func newSnapshotter(t *testing.T, opts ...Opt) func(ctx context.Context, root st
 
 		return snapshotter, func() error { return snapshotter.Close() }, nil
 	}
-}
-
-func testMount(t *testing.T, scratchFile string) error {
-	root, err := os.MkdirTemp(t.TempDir(), "")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(root)
-
-	m := []mount.Mount{
-		{
-			Type:    "ext4",
-			Source:  scratchFile,
-			Options: []string{"loop", "direct-io", "sync"},
-		},
-	}
-
-	if err := mount.All(m, root); err != nil {
-		return fmt.Errorf("failed to mount device %s: %w", scratchFile, err)
-	}
-
-	if err := os.Remove(filepath.Join(root, "lost+found")); err != nil {
-		return err
-	}
-	if err := os.Mkdir(filepath.Join(root, "work"), 0755); err != nil {
-		return err
-	}
-	if err := os.Mkdir(filepath.Join(root, "upper"), 0755); err != nil {
-		return err
-	}
-	return mount.UnmountAll(root, 0)
 }
 
 func TestErofs(t *testing.T) {
@@ -174,7 +142,10 @@ func TestErofsFsverity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	snap := s.(*snapshotter)
+	snap, ok := s.(*snapshotter)
+	if !ok {
+		t.Fatal("failed to cast snapshotter to *snapshotter")
+	}
 
 	// Get the internal ID from the snapshotter
 	var id string
@@ -278,10 +249,10 @@ func mountsHaveTemplate(mounts []mount.Mount) bool {
 	return false
 }
 
-func snapshotID(t *testing.T, s *snapshotter, key string) string {
+func snapshotID(ctx context.Context, t *testing.T, s *snapshotter, key string) string {
 	t.Helper()
 	var id string
-	if err := s.ms.WithTransaction(t.Context(), false, func(ctx context.Context) error {
+	if err := s.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
 		var err error
 		id, _, _, err = storage.GetInfo(ctx, key)
 		return err

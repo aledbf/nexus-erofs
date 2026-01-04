@@ -21,6 +21,9 @@ import (
 	"testing"
 
 	"github.com/containerd/containerd/v2/core/mount"
+
+	// Import testutil to register the -test.root flag
+	_ "github.com/aledbf/nexuserofs/internal/testutil"
 )
 
 func TestNeedsMountManager(t *testing.T) {
@@ -266,7 +269,7 @@ func TestTypeSuffix(t *testing.T) {
 func TestUniqueRef(t *testing.T) {
 	// Generate multiple refs and ensure they're unique
 	refs := make(map[string]bool)
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		ref := UniqueRef()
 		if refs[ref] {
 			t.Errorf("UniqueRef() generated duplicate: %s", ref)

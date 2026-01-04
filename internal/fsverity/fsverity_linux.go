@@ -82,6 +82,7 @@ func IsEnabled(path string) (bool, error) {
 
 	var attr int32
 
+	//nolint:gosec // G103: Use of unsafe is required for ioctl syscalls
 	_, _, flagErr := unix.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(unix.FS_IOC_GETFLAGS), uintptr(unsafe.Pointer(&attr)))
 	if flagErr != 0 {
 		return false, fmt.Errorf("error getting inode flags: %w", flagErr)
@@ -121,6 +122,7 @@ func Enable(path string) error {
 
 	args.blockSize = uint32(blockSize)
 
+	//nolint:gosec // G103: Use of unsafe is required for ioctl syscalls
 	_, _, errno := unix.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(unix.FS_IOC_ENABLE_VERITY), uintptr(unsafe.Pointer(args)))
 	if errno != 0 {
 		return fmt.Errorf("enable fsverity failed: %w", errno)

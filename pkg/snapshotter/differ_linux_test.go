@@ -48,6 +48,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aledbf/nexuserofs/internal/mountutils"
+	erofsdiffer "github.com/aledbf/nexuserofs/pkg/differ"
+	erofsutils "github.com/aledbf/nexuserofs/pkg/erofs"
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images/imagetest"
 	"github.com/containerd/containerd/v2/core/mount"
@@ -55,12 +58,18 @@ import (
 	"github.com/containerd/containerd/v2/core/snapshots/storage"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/testutil"
-	erofsutils "github.com/aledbf/nexuserofs/pkg/erofs"
-	"github.com/aledbf/nexuserofs/internal/mountutils"
-	erofsdiffer "github.com/aledbf/nexuserofs/pkg/differ"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	bolt "go.etcd.io/bbolt"
+)
+
+// Snapshot key constants used across tests
+const (
+	testKeyBase   = "base"
+	testKeyUpper  = "upper"
+	testKeyLower  = "lower"
+	testTypeExt4  = "ext4"
+	testTypeErofs = "erofs"
 )
 
 func TestErofsDifferWithTarIndexMode(t *testing.T) {
@@ -93,7 +102,6 @@ func TestErofsDifferWithTarIndexMode(t *testing.T) {
 	}
 	defer s.Close()
 	defer cleanupAllSnapshots(ctx, s)
-	snap := s.(*snapshotter)
 
 	// Create test tar content
 	tarReader := createTestTarContent()
@@ -155,7 +163,10 @@ func TestErofsDifferWithTarIndexMode(t *testing.T) {
 	}
 
 	// Get the internal snapshot ID to check the EROFS layer file
-	snap = s.(*snapshotter)
+	snap, ok := s.(*snapshotter)
+	if !ok {
+		t.Fatal("failed to cast snapshotter to *snapshotter")
+	}
 	var id string
 	if err := snap.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
 		id, _, _, err = storage.GetInfo(ctx, commitKey)
@@ -243,13 +254,16 @@ func TestErofsDifferCompareWithMountManager(t *testing.T) {
 	defer s.Close()
 	defer cleanupAllSnapshots(ctx, s)
 
-	snap := s.(*snapshotter)
+	snap, ok := s.(*snapshotter)
+	if !ok {
+		t.Fatal("failed to cast snapshotter to *snapshotter")
+	}
 
-	baseKey := "base"
+	baseKey := testKeyBase
 	if _, err := s.Prepare(ctx, baseKey, ""); err != nil {
 		t.Fatal(err)
 	}
-	baseID := snapshotID(t, snap, baseKey)
+	baseID := snapshotID(ctx, t, snap, baseKey)
 	if err := os.WriteFile(filepath.Join(snap.upperPath(baseID), "base.txt"), []byte("base"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +275,7 @@ func TestErofsDifferCompareWithMountManager(t *testing.T) {
 	if _, err := s.Prepare(ctx, childKey, "base-commit"); err != nil {
 		t.Fatal(err)
 	}
-	childID := snapshotID(t, snap, childKey)
+	childID := snapshotID(ctx, t, snap, childKey)
 	if err := os.WriteFile(filepath.Join(snap.upperPath(childID), "child.txt"), []byte("child"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -269,17 +283,17 @@ func TestErofsDifferCompareWithMountManager(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	upperKey := "upper"
+	upperKey := testKeyUpper
 	upperMounts, err := s.Prepare(ctx, upperKey, "child-commit")
 	if err != nil {
 		t.Fatal(err)
 	}
-	upperID := snapshotID(t, snap, upperKey)
+	upperID := snapshotID(ctx, t, snap, upperKey)
 	if err := os.WriteFile(filepath.Join(snap.upperPath(upperID), "upper.txt"), []byte("upper"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	lowerKey := "lower"
+	lowerKey := testKeyLower
 	lowerMounts, err := s.View(ctx, lowerKey, "child-commit")
 	if err != nil {
 		t.Fatal(err)
@@ -346,7 +360,7 @@ func TestErofsDifferCompareBlockUpperFallback(t *testing.T) {
 	defer s.Close()
 	defer cleanupAllSnapshots(ctx, s)
 
-	baseKey := "base"
+	baseKey := testKeyBase
 	if _, err := s.Prepare(ctx, baseKey, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +368,7 @@ func TestErofsDifferCompareBlockUpperFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	upperKey := "upper"
+	upperKey := testKeyUpper
 	// Prepare() creates the snapshot with a runtime marker.
 	if _, err := s.Prepare(ctx, upperKey, "base-commit"); err != nil {
 		t.Fatal(err)
@@ -387,7 +401,7 @@ func TestErofsDifferCompareBlockUpperFallback(t *testing.T) {
 	}
 	wroteFile := false
 	for _, a := range activation.Active {
-		if mountutils.TypeSuffix(a.Type) != "ext4" || a.MountPoint == "" {
+		if mountutils.TypeSuffix(a.Type) != testTypeExt4 || a.MountPoint == "" {
 			continue
 		}
 		// Write to upper/ subdirectory since overlay uses upperdir={{ mount 0 }}/upper
@@ -409,7 +423,7 @@ func TestErofsDifferCompareBlockUpperFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	lowerKey := "lower"
+	lowerKey := testKeyLower
 	lowerMounts, err := s.View(ctx, lowerKey, "base-commit")
 	if err != nil {
 		t.Fatal(err)
@@ -468,7 +482,7 @@ func TestErofsDifferComparePreservesWhiteouts(t *testing.T) {
 		defer closer.Close()
 	}
 
-	baseKey := "base"
+	baseKey := testKeyBase
 	baseMounts, err := s.Prepare(ctx, baseKey, "")
 	if err != nil {
 		t.Fatal(err)
@@ -479,7 +493,7 @@ func TestErofsDifferComparePreservesWhiteouts(t *testing.T) {
 	}
 	wroteFile := false
 	for _, a := range activation.Active {
-		if mountutils.TypeSuffix(a.Type) != "ext4" || a.MountPoint == "" {
+		if mountutils.TypeSuffix(a.Type) != testTypeExt4 || a.MountPoint == "" {
 			continue
 		}
 		upperDir := filepath.Join(a.MountPoint, "upper")
@@ -503,7 +517,7 @@ func TestErofsDifferComparePreservesWhiteouts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	upperKey := "upper"
+	upperKey := testKeyUpper
 	// Prepare() creates the snapshot with a runtime marker.
 	if _, err := s.Prepare(ctx, upperKey, "base-commit"); err != nil {
 		t.Fatal(err)
@@ -515,7 +529,7 @@ func TestErofsDifferComparePreservesWhiteouts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	lowerKey := "lower"
+	lowerKey := testKeyLower
 	lowerMounts, err := s.View(ctx, lowerKey, "base-commit")
 	if err != nil {
 		t.Fatal(err)
@@ -573,7 +587,7 @@ func TestErofsDifferCompareWithFormattedUpperMounts(t *testing.T) {
 	defer s.Close()
 	defer cleanupAllSnapshots(ctx, s)
 
-	baseKey := "base"
+	baseKey := testKeyBase
 	if _, err := s.Prepare(ctx, baseKey, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -581,7 +595,7 @@ func TestErofsDifferCompareWithFormattedUpperMounts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	upperKey := "upper"
+	upperKey := testKeyUpper
 	// Prepare() creates the snapshot with a runtime marker.
 	if _, err := s.Prepare(ctx, upperKey, "base-commit"); err != nil {
 		t.Fatal(err)
@@ -617,7 +631,7 @@ func TestErofsDifferCompareWithFormattedUpperMounts(t *testing.T) {
 	}
 	wroteFile := false
 	for _, a := range activation.Active {
-		if mountutils.TypeSuffix(a.Type) != "ext4" || a.MountPoint == "" {
+		if mountutils.TypeSuffix(a.Type) != testTypeExt4 || a.MountPoint == "" {
 			continue
 		}
 		upperDir := filepath.Join(a.MountPoint, "upper")
@@ -638,7 +652,7 @@ func TestErofsDifferCompareWithFormattedUpperMounts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	lowerKey := "lower"
+	lowerKey := testKeyLower
 	lowerMounts, err := s.View(ctx, lowerKey, "base-commit")
 	if err != nil {
 		t.Fatal(err)
@@ -686,13 +700,16 @@ func TestErofsDifferCompareWithoutMountManager(t *testing.T) {
 	defer s.Close()
 	defer cleanupAllSnapshots(ctx, s)
 
-	snap := s.(*snapshotter)
+	snap, ok := s.(*snapshotter)
+	if !ok {
+		t.Fatal("failed to cast snapshotter to *snapshotter")
+	}
 
-	baseKey := "base"
+	baseKey := testKeyBase
 	if _, err := s.Prepare(ctx, baseKey, ""); err != nil {
 		t.Fatal(err)
 	}
-	baseID := snapshotID(t, snap, baseKey)
+	baseID := snapshotID(ctx, t, snap, baseKey)
 	if err := os.WriteFile(filepath.Join(snap.upperPath(baseID), "base.txt"), []byte("base"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -700,17 +717,17 @@ func TestErofsDifferCompareWithoutMountManager(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	upperKey := "upper"
+	upperKey := testKeyUpper
 	upperMounts, err := s.Prepare(ctx, upperKey, "base-commit")
 	if err != nil {
 		t.Fatal(err)
 	}
-	upperID := snapshotID(t, snap, upperKey)
+	upperID := snapshotID(ctx, t, snap, upperKey)
 	if err := os.WriteFile(filepath.Join(snap.upperPath(upperID), "upper.txt"), []byte("upper"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	lowerKey := "lower"
+	lowerKey := testKeyLower
 	lowerMounts, err := s.View(ctx, lowerKey, "base-commit")
 	if err != nil {
 		t.Fatal(err)
@@ -758,12 +775,15 @@ func TestErofsDifferCompareMultipleStackedLayers(t *testing.T) {
 	defer s.Close()
 	defer cleanupAllSnapshots(ctx, s)
 
-	snap := s.(*snapshotter)
+	snap, ok := s.(*snapshotter)
+	if !ok {
+		t.Fatal("failed to cast snapshotter to *snapshotter")
+	}
 
 	// Create 6 stacked layers
 	layerCount := 6
 	var parentKey string
-	for i := 0; i < layerCount; i++ {
+	for i := range layerCount {
 		key := fmt.Sprintf("layer-%d", i)
 		commitKey := fmt.Sprintf("layer-%d-commit", i)
 
@@ -771,7 +791,7 @@ func TestErofsDifferCompareMultipleStackedLayers(t *testing.T) {
 			t.Fatalf("failed to prepare layer %d: %v", i, err)
 		}
 
-		id := snapshotID(t, snap, key)
+		id := snapshotID(ctx, t, snap, key)
 		filename := fmt.Sprintf("file-%d.txt", i)
 		if err := os.WriteFile(filepath.Join(snap.upperPath(id), filename), []byte(fmt.Sprintf("content-%d", i)), 0644); err != nil {
 			t.Fatalf("failed to write file in layer %d: %v", i, err)
@@ -784,18 +804,18 @@ func TestErofsDifferCompareMultipleStackedLayers(t *testing.T) {
 	}
 
 	// Create upper layer on top of all stacked layers
-	upperKey := "upper"
+	upperKey := testKeyUpper
 	upperMounts, err := s.Prepare(ctx, upperKey, parentKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	upperID := snapshotID(t, snap, upperKey)
+	upperID := snapshotID(ctx, t, snap, upperKey)
 	if err := os.WriteFile(filepath.Join(snap.upperPath(upperID), "upper.txt"), []byte("upper"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create lower view from the stacked layers
-	lowerKey := "lower"
+	lowerKey := testKeyLower
 	lowerMounts, err := s.View(ctx, lowerKey, parentKey)
 	if err != nil {
 		t.Fatal(err)
@@ -866,14 +886,17 @@ func TestErofsDifferCompareEmptyLowerMounts(t *testing.T) {
 	}
 	defer s.Close()
 
-	snap := s.(*snapshotter)
+	snap, ok := s.(*snapshotter)
+	if !ok {
+		t.Fatal("failed to cast snapshotter to *snapshotter")
+	}
 
 	// Create a single layer (no parent)
 	key := "single"
 	if _, err := s.Prepare(ctx, key, ""); err != nil {
 		t.Fatal(err)
 	}
-	id := snapshotID(t, snap, key)
+	id := snapshotID(ctx, t, snap, key)
 	if err := os.WriteFile(filepath.Join(snap.upperPath(id), "new.txt"), []byte("new"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -882,12 +905,12 @@ func TestErofsDifferCompareEmptyLowerMounts(t *testing.T) {
 	}
 
 	// Get mounts for the committed layer as upper
-	upperKey := "upper"
+	upperKey := testKeyUpper
 	upperMounts, err := s.Prepare(ctx, upperKey, "single-commit")
 	if err != nil {
 		t.Fatal(err)
 	}
-	upperID := snapshotID(t, snap, upperKey)
+	upperID := snapshotID(ctx, t, snap, upperKey)
 	if err := os.WriteFile(filepath.Join(snap.upperPath(upperID), "upper.txt"), []byte("upper"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -944,14 +967,17 @@ func TestErofsDifferCompareContextCancellation(t *testing.T) {
 	}
 	defer s.Close()
 
-	snap := s.(*snapshotter)
+	snap, ok := s.(*snapshotter)
+	if !ok {
+		t.Fatal("failed to cast snapshotter to *snapshotter")
+	}
 
 	// Create base layer
-	baseKey := "base"
+	baseKey := testKeyBase
 	if _, err := s.Prepare(baseCtx, baseKey, ""); err != nil {
 		t.Fatal(err)
 	}
-	baseID := snapshotID(t, snap, baseKey)
+	baseID := snapshotID(baseCtx, t, snap, baseKey)
 	if err := os.WriteFile(filepath.Join(snap.upperPath(baseID), "base.txt"), []byte("base"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -960,17 +986,17 @@ func TestErofsDifferCompareContextCancellation(t *testing.T) {
 	}
 
 	// Create upper layer
-	upperKey := "upper"
+	upperKey := testKeyUpper
 	upperMounts, err := s.Prepare(baseCtx, upperKey, "base-commit")
 	if err != nil {
 		t.Fatal(err)
 	}
-	upperID := snapshotID(t, snap, upperKey)
+	upperID := snapshotID(baseCtx, t, snap, upperKey)
 	if err := os.WriteFile(filepath.Join(snap.upperPath(upperID), "upper.txt"), []byte("upper"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	lowerKey := "lower"
+	lowerKey := testKeyLower
 	lowerMounts, err := s.View(baseCtx, lowerKey, "base-commit")
 	if err != nil {
 		t.Fatal(err)
@@ -1032,14 +1058,17 @@ func TestErofsDifferCompareSingleLayerView(t *testing.T) {
 	}
 	defer s.Close()
 
-	snap := s.(*snapshotter)
+	snap, ok := s.(*snapshotter)
+	if !ok {
+		t.Fatal("failed to cast snapshotter to *snapshotter")
+	}
 
 	// Create single base layer
-	baseKey := "base"
+	baseKey := testKeyBase
 	if _, err := s.Prepare(ctx, baseKey, ""); err != nil {
 		t.Fatal(err)
 	}
-	baseID := snapshotID(t, snap, baseKey)
+	baseID := snapshotID(ctx, t, snap, baseKey)
 	if err := os.WriteFile(filepath.Join(snap.upperPath(baseID), "base.txt"), []byte("base"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -1058,17 +1087,17 @@ func TestErofsDifferCompareSingleLayerView(t *testing.T) {
 	if len(viewMounts) != 1 {
 		t.Fatalf("expected single mount for view, got %d", len(viewMounts))
 	}
-	if viewMounts[0].Type != "erofs" {
+	if viewMounts[0].Type != testTypeErofs {
 		t.Fatalf("expected erofs mount type, got %s", viewMounts[0].Type)
 	}
 
 	// Create upper layer on top
-	upperKey := "upper"
+	upperKey := testKeyUpper
 	upperMounts, err := s.Prepare(ctx, upperKey, "base-commit")
 	if err != nil {
 		t.Fatal(err)
 	}
-	upperID := snapshotID(t, snap, upperKey)
+	upperID := snapshotID(ctx, t, snap, upperKey)
 	if err := os.WriteFile(filepath.Join(snap.upperPath(upperID), "new.txt"), []byte("new"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -1133,14 +1162,17 @@ func TestErofsDifferCompareViewWithMultipleLayers(t *testing.T) {
 	}
 	defer s.Close()
 
-	snap := s.(*snapshotter)
+	snap, ok := s.(*snapshotter)
+	if !ok {
+		t.Fatal("failed to cast snapshotter to *snapshotter")
+	}
 
 	// Create first layer
 	layer1Key := "layer1"
 	if _, err := s.Prepare(ctx, layer1Key, ""); err != nil {
 		t.Fatal(err)
 	}
-	layer1ID := snapshotID(t, snap, layer1Key)
+	layer1ID := snapshotID(ctx, t, snap, layer1Key)
 	if err := os.WriteFile(filepath.Join(snap.upperPath(layer1ID), "layer1.txt"), []byte("layer1"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -1153,7 +1185,7 @@ func TestErofsDifferCompareViewWithMultipleLayers(t *testing.T) {
 	if _, err := s.Prepare(ctx, layer2Key, "layer1-commit"); err != nil {
 		t.Fatal(err)
 	}
-	layer2ID := snapshotID(t, snap, layer2Key)
+	layer2ID := snapshotID(ctx, t, snap, layer2Key)
 	if err := os.WriteFile(filepath.Join(snap.upperPath(layer2ID), "layer2.txt"), []byte("layer2"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -1175,12 +1207,12 @@ func TestErofsDifferCompareViewWithMultipleLayers(t *testing.T) {
 	}
 
 	// Create upper layer
-	upperKey := "upper"
+	upperKey := testKeyUpper
 	upperMounts, err := s.Prepare(ctx, upperKey, "layer2-commit")
 	if err != nil {
 		t.Fatal(err)
 	}
-	upperID := snapshotID(t, snap, upperKey)
+	upperID := snapshotID(ctx, t, snap, upperKey)
 	if err := os.WriteFile(filepath.Join(snap.upperPath(upperID), "upper.txt"), []byte("upper"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -1243,14 +1275,17 @@ func TestErofsDifferCompareRequiresMountManagerForTemplates(t *testing.T) {
 	}
 	defer s.Close()
 
-	snap := s.(*snapshotter)
+	snap, ok := s.(*snapshotter)
+	if !ok {
+		t.Fatal("failed to cast snapshotter to *snapshotter")
+	}
 
 	// Create two layers to get overlay mounts with templates
-	baseKey := "base"
+	baseKey := testKeyBase
 	if _, err := s.Prepare(ctx, baseKey, ""); err != nil {
 		t.Fatal(err)
 	}
-	baseID := snapshotID(t, snap, baseKey)
+	baseID := snapshotID(ctx, t, snap, baseKey)
 	if err := os.WriteFile(filepath.Join(snap.upperPath(baseID), "base.txt"), []byte("base"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -1262,7 +1297,7 @@ func TestErofsDifferCompareRequiresMountManagerForTemplates(t *testing.T) {
 	if _, err := s.Prepare(ctx, childKey, "base-commit"); err != nil {
 		t.Fatal(err)
 	}
-	childID := snapshotID(t, snap, childKey)
+	childID := snapshotID(ctx, t, snap, childKey)
 	if err := os.WriteFile(filepath.Join(snap.upperPath(childID), "child.txt"), []byte("child"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -1271,13 +1306,13 @@ func TestErofsDifferCompareRequiresMountManagerForTemplates(t *testing.T) {
 	}
 
 	// Get mounts that will have templates (multiple EROFS layers + overlay)
-	upperKey := "upper"
+	upperKey := testKeyUpper
 	upperMounts, err := s.Prepare(ctx, upperKey, "child-commit")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	lowerKey := "lower"
+	lowerKey := testKeyLower
 	lowerMounts, err := s.View(ctx, lowerKey, "child-commit")
 	if err != nil {
 		t.Fatal(err)
@@ -1287,7 +1322,7 @@ func TestErofsDifferCompareRequiresMountManagerForTemplates(t *testing.T) {
 	// (EROFS mounts or templates require it)
 	needsMM := false
 	for _, m := range append(lowerMounts, upperMounts...) {
-		if m.Type == "erofs" || strings.Contains(m.Type, "format/") ||
+		if m.Type == testTypeErofs || strings.Contains(m.Type, "format/") ||
 			strings.Contains(m.Source, "{{") {
 			needsMM = true
 			break

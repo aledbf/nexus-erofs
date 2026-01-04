@@ -30,11 +30,11 @@ import (
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
+	erofsutils "github.com/aledbf/nexuserofs/pkg/erofs"
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/diff"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/mount"
-	erofsutils "github.com/aledbf/nexuserofs/pkg/erofs"
 	"github.com/google/uuid"
 )
 

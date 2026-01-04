@@ -8,27 +8,50 @@ An external EROFS snapshotter that communicates with containerd via gRPC socket.
 
 ## Architecture
 
-```
-┌─────────────────────┐     gRPC/socket     ┌────────────────────────┐
-│     containerd      │◄───────────────────►│  erofs-snapshotter     │
-│                     │                     │  (this project)        │
-│  - content store    │                     │                        │
-│  - images           │◄────client conn─────│  Implements:           │
-│  - proxy plugins    │    (for content)    │  - SnapshotsServer     │
-└─────────────────────┘                     │  - DiffServer          │
-                                            └────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph containerd
+        CS[Content Store]
+        IM[Images]
+        PP[Proxy Plugins]
+    end
+
+    subgraph erofs-snapshotter
+        SS[SnapshotsServer]
+        DS[DiffServer]
+    end
+
+    PP <-->|gRPC/socket| SS
+    PP <-->|gRPC/socket| DS
+    SS -->|client conn| CS
+    DS -->|client conn| CS
 ```
 
 ## Requirements
 
+### Runtime
+
 - Linux kernel with EROFS support (5.4+)
-- erofs-utils (mkfs.erofs)
-- containerd 2.0+
+- erofs-utils (mkfs.erofs, fsck.erofs)
+- e2fsprogs (for writable layer block mode)
+- util-linux (mount, losetup)
+- containerd 2.2+
+
+### Build
+
+- Go 1.25+
+- [Task](https://taskfile.dev)
 
 ## Building
 
 ```bash
-make build
+task build
+```
+
+Or cross-compile for Linux:
+
+```bash
+task build-linux
 ```
 
 ## Running

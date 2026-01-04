@@ -29,6 +29,9 @@ import (
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
+	"github.com/aledbf/nexuserofs/internal/cleanup"
+	"github.com/aledbf/nexuserofs/internal/mountutils"
+	erofsutils "github.com/aledbf/nexuserofs/pkg/erofs"
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/diff"
 	"github.com/containerd/containerd/v2/core/mount"
@@ -36,9 +39,6 @@ import (
 	"github.com/containerd/containerd/v2/pkg/archive/compression"
 	"github.com/containerd/containerd/v2/pkg/epoch"
 	"github.com/containerd/containerd/v2/pkg/labels"
-	"github.com/aledbf/nexuserofs/internal/cleanup"
-	"github.com/aledbf/nexuserofs/internal/mountutils"
-	erofsutils "github.com/aledbf/nexuserofs/pkg/erofs"
 )
 
 // diffWriteFunc is a function that writes diff content to the provided writer.

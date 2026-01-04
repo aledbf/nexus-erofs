@@ -32,10 +32,10 @@ import (
 	"github.com/containerd/log"
 	"github.com/moby/sys/mountinfo"
 
+	"github.com/aledbf/nexuserofs/internal/fsverity"
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/snapshots/storage"
-	"github.com/aledbf/nexuserofs/internal/fsverity"
 )
 
 // SnapshotterConfig is used to configure the erofs snapshotter instance
@@ -214,13 +214,6 @@ func (s *snapshotter) upperDir(id string) string {
 	return s.upperPath(id)
 }
 
-func (s *snapshotter) workDir(id string) string {
-	if s.blockMode {
-		return filepath.Join(s.upperPath(id), "rw", "work")
-	}
-	return s.workPath(id)
-}
-
 func (s *snapshotter) workPath(id string) string {
 	return filepath.Join(s.root, "snapshots", id, "work")
 }
@@ -348,15 +341,6 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 	return s.templateMounts(snap)
 }
 
-// runtimeMounts returns mount specifications for an already-prepared snapshot.
-// Unlike mounts(), it never calls activeMounts() since the snapshot is already set up.
-func (s *snapshotter) runtimeMounts(snap storage.Snapshot, info snapshots.Info) ([]mount.Mount, error) {
-	if s.blockMode && snap.Kind == snapshots.KindActive && isExtractSnapshot(info) {
-		return s.diffMounts(snap)
-	}
-	return s.templateMounts(snap)
-}
-
 // isExtractSnapshot returns true if the snapshot is marked for layer extraction.
 // This is determined by the extractLabel in the snapshot metadata, which is set
 // atomically during snapshot creation for TOCTOU safety.
@@ -365,7 +349,6 @@ func isExtractSnapshot(info snapshots.Info) bool {
 }
 
 // templateMounts builds mount specifications using templates for the mount manager.
-// This is the common implementation used by both mounts() and runtimeMounts().
 func (s *snapshotter) templateMounts(snap storage.Snapshot) ([]mount.Mount, error) {
 	var options []string
 
@@ -592,7 +575,7 @@ func truncateOutput(out []byte, maxLen int) string {
 // This uses O_CREAT|O_EXCL for atomic creation, avoiding TOCTOU races that
 // would occur with a separate existence check followed by creation.
 func ensureMarkerFile(path string) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		if os.IsExist(err) {
 			// File already exists, which is fine for idempotency
@@ -601,186 +584,6 @@ func ensureMarkerFile(path string) error {
 		return err
 	}
 	return f.Close()
-}
-
-func (s *snapshotter) activeMounts(snap storage.Snapshot) ([]mount.Mount, error) {
-	upperRoot := s.upperPath(snap.ID)
-	rwRoot := filepath.Join(upperRoot, "rw")
-	upperDir := filepath.Join(rwRoot, "upper")
-	workDir := filepath.Join(rwRoot, "work")
-	mergedDir := filepath.Join(upperRoot, "merged")
-
-	if err := os.MkdirAll(upperRoot, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create upper root: %w", err)
-	}
-
-	if err := os.MkdirAll(rwRoot, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create rw root: %w", err)
-	}
-
-	// Mount the writable layer if not already mounted
-	if err := s.ensureWritableMount(snap.ID, rwRoot, upperRoot); err != nil {
-		return nil, err
-	}
-
-	if err := s.ensureActiveDirectories(upperDir, workDir, mergedDir); err != nil {
-		return nil, err
-	}
-
-	// Check if already fully mounted
-	mergedMounted, err := mountinfo.Mounted(mergedDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to check merged mount: %w", err)
-	}
-	if mergedMounted {
-		return []mount.Mount{
-			{
-				Type:    "bind",
-				Source:  mergedDir,
-				Options: []string{"rw", "rbind"},
-			},
-		}, nil
-	}
-
-	// Create EROFS layer markers in active mount subdirectories.
-	// These markers at fs/ and fs/rw/ ensure the differ can validate layers
-	// when mounts reference these directories (e.g., overlay upperdir paths).
-	for _, markerRoot := range []string{upperRoot, rwRoot} {
-		if err := ensureMarkerFile(filepath.Join(markerRoot, erofsLayerMarker)); err != nil {
-			return nil, fmt.Errorf("failed to create erofs marker in %s: %w", markerRoot, err)
-		}
-	}
-
-	if len(snap.ParentIDs) == 0 {
-		return []mount.Mount{
-			{
-				Type:    "bind",
-				Source:  upperDir,
-				Options: []string{"rw", "rbind"},
-			},
-		}, nil
-	}
-
-	// Mount lower layers and overlay
-	return s.mountOverlay(snap, upperRoot, upperDir, workDir, mergedDir)
-}
-
-// ensureWritableMount mounts the ext4 writable layer if not already mounted.
-func (s *snapshotter) ensureWritableMount(id, rwRoot, upperRoot string) error {
-	mounted, err := mountinfo.Mounted(rwRoot)
-	if err != nil {
-		return fmt.Errorf("failed to check rw root mount: %w", err)
-	}
-	if mounted {
-		return nil
-	}
-
-	ext4Mount := mount.Mount{
-		Source:  s.writablePath(id),
-		Type:    "ext4",
-		Options: []string{"rw", "loop"},
-	}
-	if err := mount.All([]mount.Mount{ext4Mount}, rwRoot); err != nil {
-		return fmt.Errorf("failed to mount writable layer: %w", err)
-	}
-	return nil
-}
-
-// ensureActiveDirectories creates the upper, work, and merged directories.
-func (s *snapshotter) ensureActiveDirectories(upperDir, workDir, mergedDir string) error {
-	if err := os.MkdirAll(upperDir, 0755); err != nil {
-		return fmt.Errorf("failed to create upper dir: %w", err)
-	}
-	if err := os.MkdirAll(workDir, 0755); err != nil {
-		return fmt.Errorf("failed to create work dir: %w", err)
-	}
-	if err := os.MkdirAll(mergedDir, 0755); err != nil {
-		return fmt.Errorf("failed to create merged dir: %w", err)
-	}
-	return nil
-}
-
-// mountOverlay mounts the lower EROFS layers and creates the overlay mount.
-func (s *snapshotter) mountOverlay(snap storage.Snapshot, upperRoot, upperDir, workDir, mergedDir string) ([]mount.Mount, error) {
-	lowerMounts, err := s.collectLowerMounts(snap)
-	if err != nil {
-		return nil, err
-	}
-
-	lowerRoot := filepath.Join(upperRoot, "lower")
-	lowerDirs, err := s.mountLowerLayers(lowerMounts, lowerRoot)
-	if err != nil {
-		return nil, err
-	}
-
-	options := []string{
-		fmt.Sprintf("lowerdir=%s", strings.Join(lowerDirs, ":")),
-		fmt.Sprintf("upperdir=%s", upperDir),
-		fmt.Sprintf("workdir=%s", workDir),
-	}
-	options = append(options, s.ovlOptions...)
-
-	overlay := mount.Mount{
-		Type:    "overlay",
-		Source:  "overlay",
-		Options: options,
-	}
-	if err := mount.All([]mount.Mount{overlay}, mergedDir); err != nil {
-		return nil, fmt.Errorf("failed to mount overlay: %w", err)
-	}
-
-	return []mount.Mount{
-		{
-			Type:    "bind",
-			Source:  mergedDir,
-			Options: []string{"rw", "rbind"},
-		},
-	}, nil
-}
-
-// collectLowerMounts collects the EROFS mount specifications for parent layers.
-func (s *snapshotter) collectLowerMounts(snap storage.Snapshot) ([]mount.Mount, error) {
-	var lowerMounts []mount.Mount
-	for i := range snap.ParentIDs {
-		if s.fsMergeThreshold > 0 {
-			if m, ok := s.mountFsMeta(snap, i); ok {
-				lowerMounts = append(lowerMounts, m)
-				break
-			}
-		}
-		layerBlob, err := s.lowerPath(snap.ParentIDs[i])
-		if err != nil {
-			return nil, err
-		}
-		lowerMounts = append(lowerMounts, mount.Mount{
-			Source:  layerBlob,
-			Type:    "erofs",
-			Options: []string{"ro", "loop"},
-		})
-	}
-	return lowerMounts, nil
-}
-
-// mountLowerLayers mounts each lower layer and returns the list of mount points.
-func (s *snapshotter) mountLowerLayers(lowerMounts []mount.Mount, lowerRoot string) ([]string, error) {
-	var lowerDirs []string
-	for i, m := range lowerMounts {
-		target := filepath.Join(lowerRoot, fmt.Sprintf("%d", i))
-		if err := os.MkdirAll(target, 0755); err != nil {
-			return nil, fmt.Errorf("failed to create lower dir: %w", err)
-		}
-		mounted, err := mountinfo.Mounted(target)
-		if err != nil {
-			return nil, fmt.Errorf("failed to check lower mount: %w", err)
-		}
-		if !mounted {
-			if err := mount.All([]mount.Mount{m}, target); err != nil {
-				return nil, fmt.Errorf("failed to mount lower layer: %w", err)
-			}
-		}
-		lowerDirs = append(lowerDirs, target)
-	}
-	return lowerDirs, nil
 }
 
 func (s *snapshotter) diffMounts(snap storage.Snapshot) ([]mount.Mount, error) {
@@ -825,7 +628,7 @@ func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 			if path != "" {
 				if err1 := os.RemoveAll(path); err1 != nil {
 					log.G(ctx).WithError(err1).WithField("path", path).Error("failed to reclaim snapshot directory, directory may need removal")
-					err = fmt.Errorf("failed to remove path: %v: %w", err1, err)
+					err = fmt.Errorf("failed to remove path: %w: %w", err1, err)
 				}
 			}
 		}
@@ -965,7 +768,7 @@ func (s *snapshotter) generateFsMeta(ctx context.Context, snapIDs []string) {
 	t1 := time.Now()
 	mergedMeta := s.fsMetaPath(snapIDs[0])
 	// If the empty placeholder cannot be created (mainly due to os.IsExist), just return
-	if _, err := os.OpenFile(mergedMeta, os.O_CREATE|os.O_EXCL, 0644); err != nil {
+	if _, err := os.OpenFile(mergedMeta, os.O_CREATE|os.O_EXCL, 0600); err != nil {
 		return
 	}
 

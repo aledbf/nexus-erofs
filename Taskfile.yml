@@ -1,0 +1,75 @@
+# https://taskfile.dev
+
+version: '3'
+
+vars:
+  BINARY: nexuserofs-snapshotter
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"
+  COMMIT:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo "unknown"
+  BUILD_TIME:
+    sh: date -u '+%Y-%m-%d_%H:%M:%S'
+  LDFLAGS: -X main.version={{.VERSION}} -X main.commit={{.COMMIT}} -X main.buildTime={{.BUILD_TIME}}
+  BIN_DIR: bin
+  CMD_DIR: cmd/nexuserofs-snapshotter
+
+tasks:
+  default:
+    desc: Build the binary
+    cmds:
+      - task: build
+
+  build:
+    desc: Build the binary
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - CGO_ENABLED=0 go build -trimpath -ldflags "{{.LDFLAGS}}" -o {{.BIN_DIR}}/{{.BINARY}} ./{{.CMD_DIR}}
+    sources:
+      - ./**/*.go
+      - go.mod
+      - go.sum
+    generates:
+      - '{{.BIN_DIR}}/{{.BINARY}}'
+
+  build-linux:
+    desc: Build for Linux (cross-compile)
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "{{.LDFLAGS}}" -o {{.BIN_DIR}}/{{.BINARY}} ./{{.CMD_DIR}}
+
+  test:
+    desc: Run tests
+    cmds:
+      - go test -race -count=1 ./...
+
+  test-root:
+    desc: Run tests as root (required for integration tests)
+    cmds:
+      - sudo env PATH="$PATH" GOPATH="$GOPATH" GOCACHE="$GOCACHE" go test -race -count=1 ./... -test.root
+
+  lint:
+    desc: Run linter
+    cmds:
+      - golangci-lint run ./...
+
+  fmt:
+    desc: Format code
+    cmds:
+      - go fmt ./...
+      - gofumpt -w .
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  tidy:
+    desc: Run go mod tidy
+    cmds:
+      - go mod tidy
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - rm -rf {{.BIN_DIR}}

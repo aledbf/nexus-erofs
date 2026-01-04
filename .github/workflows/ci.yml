@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y erofs-utils
+
+      - name: Load EROFS kernel module
+        run: sudo modprobe erofs || true
+
+      - name: Run tests as root
+        run: |
+          sudo env "PATH=$PATH" "GOPATH=$GOPATH" "GOCACHE=$GOCACHE" "GOMODCACHE=$GOMODCACHE" \
+            go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.txt
+          fail_ci_if_error: false
+
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux]
+        goarch: [amd64, arm64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          go build -trimpath -ldflags "-s -w" -o nexuserofs-snapshotter-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/nexuserofs-snapshotter
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexuserofs-snapshotter-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: nexuserofs-snapshotter-${{ matrix.goos }}-${{ matrix.goarch }}

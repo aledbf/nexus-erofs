@@ -29,8 +29,8 @@ import (
 	"github.com/containerd/plugin"
 	"golang.org/x/sys/unix"
 
-	"github.com/containerd/containerd/v2/core/mount"
 	erofsutils "github.com/aledbf/nexuserofs/pkg/erofs"
+	"github.com/containerd/containerd/v2/core/mount"
 )
 
 // defaultWritableSize is set to 0 for Linux to match the default behavior of
@@ -185,7 +185,10 @@ func upperDirectoryPermission(p, parent string) error {
 		return fmt.Errorf("failed to stat parent: %w", err)
 	}
 
-	stat := st.Sys().(*syscall.Stat_t)
+	stat, ok := st.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("failed to get syscall.Stat_t from file info")
+	}
 	if err := os.Lchown(p, int(stat.Uid), int(stat.Gid)); err != nil {
 		return fmt.Errorf("failed to chown: %w", err)
 	}

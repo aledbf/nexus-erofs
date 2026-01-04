@@ -38,6 +38,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aledbf/nexuserofs/internal/mountutils"
+	erofsdiffer "github.com/aledbf/nexuserofs/pkg/differ"
 	"github.com/containerd/containerd/v2/core/images/imagetest"
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/mount/manager"
@@ -45,8 +47,6 @@ import (
 	"github.com/containerd/containerd/v2/core/snapshots/storage"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/testutil"
-	"github.com/aledbf/nexuserofs/internal/mountutils"
-	erofsdiffer "github.com/aledbf/nexuserofs/pkg/differ"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -73,7 +73,10 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 	defer s.Close()
 	defer cleanupAllSnapshots(ctx, s)
 
-	snap := s.(*snapshotter)
+	snap, ok := s.(*snapshotter)
+	if !ok {
+		t.Fatal("failed to cast snapshotter to *snapshotter")
+	}
 
 	db, err := bolt.Open(filepath.Join(tempDir, "mounts.db"), 0600, nil)
 	if err != nil {
@@ -105,7 +108,7 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 		if _, err := s.Prepare(ctx, key, parent); err != nil {
 			return "", err
 		}
-		id := snapshotID(t, snap, key)
+		id := snapshotID(ctx, t, snap, key)
 		if err := writeFiles(snap.upperPath(id), files); err != nil {
 			return "", err
 		}
@@ -149,7 +152,7 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		upperID := snapshotID(t, snap, upperKey)
+		upperID := snapshotID(ctx, t, snap, upperKey)
 		if err := writeFiles(snap.upperPath(upperID), upperFiles); err != nil {
 			t.Fatal(err)
 		}
@@ -275,11 +278,14 @@ func TestErofsSnapshotterFsmetaSingleLayerView(t *testing.T) {
 	}
 	defer s.Close()
 
-	snap := s.(*snapshotter)
+	snap, ok := s.(*snapshotter)
+	if !ok {
+		t.Fatal("failed to cast snapshotter to *snapshotter")
+	}
 
 	// Create 3 layers to exceed the threshold and trigger fsmeta generation
 	var parentKey string
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		key := fmt.Sprintf("layer-%d", i)
 		commitKey := fmt.Sprintf("layer-%d-commit", i)
 
@@ -287,7 +293,7 @@ func TestErofsSnapshotterFsmetaSingleLayerView(t *testing.T) {
 			t.Fatalf("failed to prepare layer %d: %v", i, err)
 		}
 
-		id := snapshotID(t, snap, key)
+		id := snapshotID(ctx, t, snap, key)
 		filename := fmt.Sprintf("file-%d.txt", i)
 		if err := os.WriteFile(filepath.Join(snap.upperPath(id), filename), []byte(fmt.Sprintf("content-%d", i)), 0644); err != nil {
 			t.Fatalf("failed to write file in layer %d: %v", i, err)
@@ -386,15 +392,15 @@ func TestErofsBlockModeMountsAfterPrepare(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hasMkfs := false
+	hasExt4 := false
 	for _, m := range mounts1 {
-		if m.Type == "mkfs/ext4" {
-			hasMkfs = true
+		if m.Type == "ext4" {
+			hasExt4 = true
 			break
 		}
 	}
-	if !hasMkfs {
-		t.Fatalf("expected Mounts to include mkfs/ext4 template, got: %#v", mounts1)
+	if !hasExt4 {
+		t.Fatalf("expected Mounts to include ext4 template, got: %#v", mounts1)
 	}
 
 	// Subsequent calls also return template mounts (no overlay mounted on host).
@@ -437,7 +443,11 @@ func TestErofsCleanupRemovesOrphan(t *testing.T) {
 	}
 
 	// Create an orphan snapshot directory not tracked by metadata.
-	orphanDir := filepath.Join(snapshtr.(*snapshotter).root, "snapshots", "orphan")
+	snap, ok := snapshtr.(*snapshotter)
+	if !ok {
+		t.Fatal("failed to cast snapshotter to *snapshotter")
+	}
+	orphanDir := filepath.Join(snap.root, "snapshots", "orphan")
 	if err := os.MkdirAll(filepath.Join(orphanDir, "fs"), 0755); err != nil {
 		t.Fatal(err)
 	}
