@@ -33,13 +33,16 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 )
 
-// ConvertTarErofs converts a tar stream to an EROFS image
+// ConvertTarErofs converts a tar stream to an EROFS image.
+// The tar content is read from stdin (r) and written to layerPath.
 func ConvertTarErofs(ctx context.Context, r io.Reader, layerPath, uuid string, mkfsExtraOpts []string) error {
 	args := append([]string{"--tar=f", "--aufs", "--quiet", "-Enoinline_data"}, mkfsExtraOpts...)
 	if uuid != "" {
 		args = append(args, []string{"-U", uuid}...)
 	}
-	args = append(args, layerPath)
+	// mkfs.erofs --tar=f expects: OUTPUT TARFILE
+	// Use "-" as TARFILE to read from stdin
+	args = append(args, layerPath, "-")
 	cmd := exec.CommandContext(ctx, "mkfs.erofs", args...)
 	cmd.Stdin = r
 	out, err := cmd.CombinedOutput()
@@ -69,8 +72,10 @@ func GenerateTarIndexAndAppendTar(ctx context.Context, r io.Reader, layerPath st
 	teeReader := io.TeeReader(r, tarFile)
 
 	// Generate tar index directly to layerPath using --tar=i option
+	// mkfs.erofs --tar=i expects: OUTPUT TARFILE
+	// Use "-" as TARFILE to read from stdin
 	args := append([]string{"--tar=i", "--aufs", "--quiet"}, mkfsExtraOpts...)
-	args = append(args, layerPath)
+	args = append(args, layerPath, "-")
 	cmd := exec.CommandContext(ctx, "mkfs.erofs", args...)
 	cmd.Stdin = teeReader
 	out, err := cmd.CombinedOutput()
