@@ -27,6 +27,7 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/continuity/fs"
 	"github.com/containerd/log"
+	"github.com/moby/sys/mountinfo"
 	"golang.org/x/sys/unix"
 
 	erofsutils "github.com/aledbf/nexuserofs/internal/erofs"
@@ -173,6 +174,35 @@ func upperDirectoryPermission(p, parent string) error {
 	}
 	if err := os.Lchown(p, int(stat.Uid), int(stat.Gid)); err != nil {
 		return fmt.Errorf("failed to chown: %w", err)
+	}
+
+	return nil
+}
+
+// mountErofsLayer mounts an EROFS layer at the specified mount point using a loop device.
+// The mount is read-only. Returns nil if already mounted or if mounting succeeds.
+func mountErofsLayer(layerPath, mountPoint string) error {
+	if err := os.MkdirAll(mountPoint, 0755); err != nil {
+		return fmt.Errorf("failed to create mount point: %w", err)
+	}
+
+	// Check if already mounted to make this idempotent
+	mounted, err := mountinfo.Mounted(mountPoint)
+	if err != nil {
+		return fmt.Errorf("failed to check if %s is mounted: %w", mountPoint, err)
+	}
+	if mounted {
+		return nil // Already mounted, nothing to do
+	}
+
+	m := mount.Mount{
+		Type:    "erofs",
+		Source:  layerPath,
+		Options: []string{"ro", "loop"},
+	}
+
+	if err := m.Mount(mountPoint); err != nil {
+		return fmt.Errorf("failed to mount EROFS layer %s at %s: %w", layerPath, mountPoint, err)
 	}
 
 	return nil

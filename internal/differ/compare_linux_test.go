@@ -73,14 +73,15 @@ func TestRequiresMountResolution(t *testing.T) {
 			want:  true,
 		},
 		{
-			name: "erofs with device option requires resolution",
+			name: "erofs with device option - no special handling",
 			lower: []mount.Mount{{
+				// device= options are deprecated; multi-layer uses separate EROFS mounts
 				Type:    "erofs",
 				Source:  "/path/to/fsmeta.erofs",
-				Options: []string{"device=/path/to/blob1.erofs", "device=/path/to/blob2.erofs"},
+				Options: []string{"device=/path/to/blob1.erofs"},
 			}},
 			upper: []mount.Mount{{Type: "bind", Source: "/upper"}},
-			want:  true,
+			want:  false,
 		},
 		{
 			name:  "simple erofs without device option does not require resolution",

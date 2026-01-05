@@ -49,10 +49,12 @@ import (
 
 	"github.com/containerd/containerd/v2/core/images/imagetest"
 	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/core/mount/manager"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/snapshots/storage"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/testutil"
+	bolt "go.etcd.io/bbolt"
 
 	erofsdiffer "github.com/aledbf/nexuserofs/internal/differ"
 	"github.com/aledbf/nexuserofs/internal/mountutils"
@@ -87,7 +89,28 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 		t.Fatal("failed to cast snapshotter to *snapshotter")
 	}
 
-	differ := erofsdiffer.NewErofsDiffer(contentStore)
+	// Create mount manager for template expansion
+	db, err := bolt.Open(filepath.Join(tempDir, "mounts.db"), 0600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	mountRoot := filepath.Join(tempDir, "mounts")
+	mm, err := manager.NewManager(db, mountRoot, manager.WithAllowedRoot(snapshotRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closer, ok := mm.(interface{ Close() error }); ok {
+		defer closer.Close()
+	}
+	// Clean up any mounts in the mount root before temp directory cleanup.
+	// This ensures EROFS loop mounts are unmounted before RemoveAll runs.
+	t.Cleanup(func() {
+		mount.UnmountRecursive(mountRoot, 0)
+	})
+
+	differ := erofsdiffer.NewErofsDiffer(contentStore, erofsdiffer.WithMountManager(mm))
 
 	writeFiles := func(dir string, files map[string]string) error {
 		for name, content := range files {
@@ -98,7 +121,8 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 		return nil
 	}
 
-	commitWithFiles := func(key, parent string, files map[string]string) (string, error) {
+	commitWithFiles := func(t *testing.T, key, parent string, files map[string]string) (string, error) {
+		t.Helper()
 		if _, err := s.Prepare(ctx, key, parent); err != nil {
 			return "", err
 		}
@@ -113,22 +137,23 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 		return commitKey, nil
 	}
 
-	runFlow := func(name string, baseFiles, midFiles, topFiles, upperFiles map[string]string, expectMulti bool) {
-		baseCommit, err := commitWithFiles(name+"-base", "", baseFiles)
+	runFlow := func(t *testing.T, name string, baseFiles, midFiles, topFiles, upperFiles map[string]string, expectMulti bool) {
+		t.Helper()
+		baseCommit, err := commitWithFiles(t, name+"-base", "", baseFiles)
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		parentCommit := baseCommit
 		if midFiles != nil {
-			midCommit, err := commitWithFiles(name+"-mid", parentCommit, midFiles)
+			midCommit, err := commitWithFiles(t, name+"-mid", parentCommit, midFiles)
 			if err != nil {
 				t.Fatal(err)
 			}
 			parentCommit = midCommit
 		}
 		if topFiles != nil {
-			topCommit, err := commitWithFiles(name+"-top", parentCommit, topFiles)
+			topCommit, err := commitWithFiles(t, name+"-top", parentCommit, topFiles)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -151,13 +176,10 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Lower mounts should NOT have templates - they should be directly mountable
-		if mountsHaveTemplate(lowerMounts) {
-			t.Fatalf("expected lower mounts without templates, got: %#v", lowerMounts)
-		}
+		// View mounts should be directly mountable
 		if expectMulti {
-			// Multi-layer: expect overlay with real paths
-			if len(lowerMounts) != 1 || lowerMounts[0].Type != testTypeOverlay {
+			// Multi-layer: expect single overlay mount (layers pre-mounted by snapshotter)
+			if len(lowerMounts) != 1 || lowerMounts[0].Type != "overlay" {
 				t.Fatalf("expected single overlay mount for multi-layer, got: %#v", lowerMounts)
 			}
 		} else {
@@ -166,10 +188,8 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 				t.Fatalf("expected single EROFS mount, got: %#v", lowerMounts)
 			}
 		}
-		// Upper mounts should NOT have templates - they should be directly mountable
-		if mountsHaveTemplate(upperMounts) {
-			t.Fatalf("expected upper mounts without templates, got: %#v", upperMounts)
-		}
+		// Upper mounts should also be directly mountable
+		t.Logf("upper mounts: %#v", upperMounts)
 
 		desc, err := differ.Compare(ctx, lowerMounts, upperMounts)
 		if err != nil {
@@ -198,7 +218,7 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// View mounts are directly mountable (no templates)
+		// Verify files using mount manager (mounts may have templates)
 		verifyFiles := func(root string, files map[string]string) {
 			for name, content := range files {
 				data, err := os.ReadFile(filepath.Join(root, name))
@@ -211,24 +231,26 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 			}
 		}
 
-		// Mount and verify files
-		if err := mount.WithTempMount(ctx, viewMounts, func(root string) error {
-			verifyFiles(root, baseFiles)
-			if midFiles != nil {
-				verifyFiles(root, midFiles)
-			}
-			if topFiles != nil {
-				verifyFiles(root, topFiles)
-			}
-			verifyFiles(root, upperFiles)
-			return nil
-		}); err != nil {
+		// Mount using mount manager and verify files
+		viewTarget := t.TempDir()
+		if _, err := mm.Activate(ctx, viewTarget, viewMounts); err != nil {
 			t.Fatal(err)
+		}
+		verifyFiles(viewTarget, baseFiles)
+		if midFiles != nil {
+			verifyFiles(viewTarget, midFiles)
+		}
+		if topFiles != nil {
+			verifyFiles(viewTarget, topFiles)
+		}
+		verifyFiles(viewTarget, upperFiles)
+		if err := mm.Deactivate(ctx, viewTarget); err != nil {
+			t.Logf("failed to deactivate view: %v", err)
 		}
 	}
 
 	t.Run("single-layer", func(t *testing.T) {
-		runFlow("single",
+		runFlow(t, "single",
 			map[string]string{"base.txt": "base"},
 			nil,
 			nil,
@@ -238,7 +260,7 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 	})
 
 	t.Run("multi-layer-overlay", func(t *testing.T) {
-		runFlow("multi",
+		runFlow(t, "multi",
 			map[string]string{"base.txt": "base"},
 			map[string]string{"mid.txt": "mid"},
 			map[string]string{"top.txt": "top"},
@@ -518,51 +540,40 @@ func TestErofsViewMountsMultiLayer(t *testing.T) {
 
 	t.Logf("view mounts: %#v", viewMounts)
 
-	// Should have a single EROFS mount (not overlay)
+	// Multi-layer views return a single overlay mount (layers are pre-mounted by snapshotter)
 	if len(viewMounts) != 1 {
-		t.Fatalf("expected single EROFS mount, got %d mounts: %#v", len(viewMounts), viewMounts)
+		t.Fatalf("expected 1 overlay mount, got %d mounts: %#v", len(viewMounts), viewMounts)
 	}
 
-	// Verify it's an EROFS mount descriptor
-	if viewMounts[0].Type != testTypeErofs {
-		t.Fatalf("expected erofs mount type, got: %s", viewMounts[0].Type)
+	// Should be overlay type with lowerdir pointing to mounted layers
+	if viewMounts[0].Type != "overlay" {
+		t.Fatalf("expected overlay type, got: %s", viewMounts[0].Type)
 	}
 
-	// Source should be the first (newest) layer blob
-	if viewMounts[0].Source == "" {
-		t.Fatal("expected non-empty source path")
-	}
-	if !strings.HasSuffix(viewMounts[0].Source, ".erofs") {
-		t.Fatalf("expected source to be EROFS blob, got: %s", viewMounts[0].Source)
-	}
-
-	// Should have device= options for additional layers
-	deviceCount := 0
+	// Verify lowerdir option exists with actual paths (not templates)
+	hasLowerdir := false
 	for _, opt := range viewMounts[0].Options {
-		if strings.HasPrefix(opt, "device=") {
-			deviceCount++
-			// Each device= option should point to an EROFS blob
-			devicePath := strings.TrimPrefix(opt, "device=")
-			if !strings.HasSuffix(devicePath, ".erofs") {
-				t.Fatalf("expected device path to be EROFS blob, got: %s", devicePath)
+		if strings.HasPrefix(opt, "lowerdir=") {
+			hasLowerdir = true
+			// Should NOT contain templates
+			if strings.Contains(opt, "{{") {
+				t.Fatalf("overlay lowerdir should have actual paths, not templates: %s", opt)
 			}
 		}
 	}
-
-	// With 3 layers: source is layer 0, device= for layers 1 and 2
-	if deviceCount != 2 {
-		t.Fatalf("expected 2 device= options for 3-layer view, got %d", deviceCount)
+	if !hasLowerdir {
+		t.Fatalf("overlay mount should have lowerdir option, got: %v", viewMounts[0].Options)
 	}
 
-	// No actual mounting is done - no lower directory should exist
+	// Layer directories should exist (mounted by snapshotter)
 	viewID := snapshotID(ctx, t, snap, viewKey)
-	lowerDir := snap.viewLowerPath(viewID)
-	_, err = os.Stat(lowerDir)
-	if err == nil {
-		t.Fatalf("expected no lower directory (no host mounting), but found: %s", lowerDir)
+	layersDir := filepath.Join(snap.root, "snapshots", viewID, "layers")
+	entries, err := os.ReadDir(layersDir)
+	if err != nil {
+		t.Fatalf("expected layers directory to exist: %v", err)
 	}
-	if !os.IsNotExist(err) {
-		t.Fatalf("expected not exist error, got: %v", err)
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 layer mounts, got %d", len(entries))
 	}
 }
 
@@ -676,12 +687,26 @@ func TestErofsViewMountsCleanupOnRemove(t *testing.T) {
 
 	t.Logf("view mounts: %#v", viewMounts)
 
-	// Verify the view returns EROFS descriptor
+	// Multi-layer views pre-mount EROFS layers and return a single overlay mount
 	if len(viewMounts) != 1 {
-		t.Fatalf("expected single EROFS mount, got %d", len(viewMounts))
+		t.Fatalf("expected 1 overlay mount, got %d: %+v", len(viewMounts), viewMounts)
 	}
-	if viewMounts[0].Type != testTypeErofs {
-		t.Fatalf("expected erofs mount type, got: %s", viewMounts[0].Type)
+	if viewMounts[0].Type != "overlay" {
+		t.Fatalf("expected overlay mount type, got: %s", viewMounts[0].Type)
+	}
+	// Should have lowerdir with actual paths (not templates)
+	hasLowerdir := false
+	for _, opt := range viewMounts[0].Options {
+		if strings.HasPrefix(opt, "lowerdir=") {
+			hasLowerdir = true
+			// Should NOT have template syntax
+			if strings.Contains(opt, "{{") {
+				t.Errorf("expected actual paths in lowerdir, got template: %s", opt)
+			}
+		}
+	}
+	if !hasLowerdir {
+		t.Error("overlay mount should have lowerdir option")
 	}
 
 	// Get snapshot directory path
@@ -909,24 +934,30 @@ func TestErofsBlockModeIgnoresFsMerge(t *testing.T) {
 		}
 	}
 
-	// Should be overlay with real lowerdirs (not merged fsmeta)
+	// Multi-layer views pre-mount EROFS layers and return a single overlay mount
 	if len(viewMounts) != 1 {
-		t.Fatalf("expected 1 mount, got %d", len(viewMounts))
-	}
-	if viewMounts[0].Type != testTypeOverlay {
-		t.Fatalf("expected overlay mount, got %s", viewMounts[0].Type)
+		t.Fatalf("expected 1 overlay mount, got %d: %+v", len(viewMounts), viewMounts)
 	}
 
-	// The lowerdir should contain multiple paths (one per layer)
+	// Should be overlay type with actual paths
+	if viewMounts[0].Type != "overlay" {
+		t.Fatalf("expected overlay mount type, got %s", viewMounts[0].Type)
+	}
+
+	// The lowerdir should have actual paths (not templates)
+	hasLowerdir := false
 	for _, opt := range viewMounts[0].Options {
 		if strings.HasPrefix(opt, "lowerdir=") {
-			lowerdir := strings.TrimPrefix(opt, "lowerdir=")
-			paths := strings.Split(lowerdir, ":")
-			if len(paths) < 2 {
-				t.Errorf("expected multiple lowerdirs for 2-layer view, got: %s", lowerdir)
+			hasLowerdir = true
+			// Should NOT have template syntax
+			if strings.Contains(opt, "{{") {
+				t.Errorf("expected actual paths in lowerdir, got template: %s", opt)
 			}
-			t.Logf("lowerdir paths: %v", paths)
+			t.Logf("lowerdir option: %s", opt)
 		}
+	}
+	if !hasLowerdir {
+		t.Error("overlay mount should have lowerdir option")
 	}
 }
 

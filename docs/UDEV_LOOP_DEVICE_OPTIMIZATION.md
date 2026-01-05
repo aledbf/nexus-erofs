@@ -46,6 +46,10 @@ sudo tee /etc/udev/rules.d/49-skip-loop-scsi.rules << 'EOF'
 # Skip SCSI detection and warnings for all loop devices
 # Sets ID_SERIAL to prevent the 55-scsi-sg3_id.rules warning
 SUBSYSTEM=="block", KERNEL=="loop*", ENV{ID_SERIAL}="loop", ENV{ID_SCSI}="0", ENV{ID_SCSI_INQUIRY}="0"
+
+# Reduce CPU overhead from udisksd and systemd for loop devices
+SUBSYSTEM=="block", KERNEL=="loop*", ENV{UDISKS_IGNORE}="1"
+SUBSYSTEM=="block", KERNEL=="loop*", ENV{SYSTEMD_READY}="0", OPTIONS+="nowatch"
 EOF
 
 sudo udevadm control --reload-rules
@@ -60,6 +64,9 @@ sudo udevadm control --reload-rules
 | `ENV{ID_SERIAL}="loop"` | Set a serial to prevent "no device ID" warning |
 | `ENV{ID_SCSI}="0"` | Mark device as non-SCSI |
 | `ENV{ID_SCSI_INQUIRY}="0"` | Disable SCSI inquiry commands |
+| `ENV{UDISKS_IGNORE}="1"` | Tell udisksd to ignore the device (reduces CPU) |
+| `ENV{SYSTEMD_READY}="0"` | Skip systemd device unit creation |
+| `OPTIONS+="nowatch"` | Disable inotify watching |
 
 The rule file is numbered `49-` to ensure it runs **before** `55-scsi-sg3_id.rules`.
 
@@ -115,17 +122,42 @@ You might wonder why we don't match on `ENV{ID_SERIAL}=="erofs-*"` instead of al
 
 Since loop devices are never SCSI devices, skipping SCSI detection for ALL loop devices is the correct, race-free solution.
 
+## Systemd Mount Unit Overhead
+
+By default, systemd creates a `.mount` unit for every mount point it sees. With many EROFS layers, this causes:
+- High CPU usage from systemd's mount unit generator
+- Log spam with "Deactivated successfully" messages
+- Thousands of transient mount units
+
+### Solution: Private Mount Namespace
+
+The nexuserofs systemd service uses `MountFlags=private` to run in a private mount namespace. This hides all EROFS mounts from systemd's mount unit generator.
+
+```ini
+[Service]
+# Prevents systemd from creating mount units for EROFS layers
+MountFlags=private
+```
+
+For tests, run in a private mount namespace:
+
+```bash
+sudo unshare -m sh -c 'mount --make-rprivate / && go test -race -cover ./... -test.root'
+```
+
 ## Performance Impact
 
-Without the fix:
+Without the fixes:
 - 5-10 `sg_inq` processes per loop device
-- Multiple retry attempts
-- Noticeable CPU spike during container startup
+- Multiple retry attempts from SCSI detection
+- High CPU from systemd mount unit generation
+- High CPU from udisksd monitoring
 - Log spam with warnings
 
-With the fix:
+With the fixes:
 - Zero `sg_inq` processes for loop devices
-- No CPU overhead from SCSI detection
+- No systemd mount units for EROFS layers
+- No udisksd monitoring overhead
 - Clean logs
 - Fast container startup
 

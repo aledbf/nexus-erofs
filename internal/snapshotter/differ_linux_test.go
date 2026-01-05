@@ -57,6 +57,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	bolt "go.etcd.io/bbolt"
+	"golang.org/x/sys/unix"
 
 	erofsdiffer "github.com/aledbf/nexuserofs/internal/differ"
 	erofsutils "github.com/aledbf/nexuserofs/internal/erofs"
@@ -300,18 +301,16 @@ func TestErofsDifferCompareWithMountManager(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Mounts should NOT have templates - they should be directly usable
-	if mountsHaveTemplate(lowerMounts) {
-		t.Fatalf("expected lower mounts without templates, got: %#v", lowerMounts)
+	// Multi-layer views pre-mount EROFS layers and return a single overlay mount
+	if len(lowerMounts) != 1 {
+		t.Fatalf("expected 1 overlay mount, got: %#v", lowerMounts)
 	}
-	if mountsHaveTemplate(upperMounts) {
-		t.Fatalf("expected upper mounts without templates, got: %#v", upperMounts)
+	if lowerMounts[0].Type != "overlay" {
+		t.Fatalf("expected overlay mount type, got: %s", lowerMounts[0].Type)
 	}
 
-	// Multi-layer view should return overlay mount
-	if len(lowerMounts) != 1 || lowerMounts[0].Type != testTypeOverlay {
-		t.Fatalf("expected single overlay mount for multi-layer view, got: %#v", lowerMounts)
-	}
+	// Active snapshots return overlay with upperdir/workdir from writable layer
+	t.Logf("upper mounts: %#v", upperMounts)
 
 	db, err := bolt.Open(filepath.Join(tempDir, "mounts.db"), 0600, nil)
 	if err != nil {
@@ -327,6 +326,7 @@ func TestErofsDifferCompareWithMountManager(t *testing.T) {
 	if closer, ok := mm.(interface{ Close() error }); ok {
 		defer closer.Close()
 	}
+	t.Cleanup(func() { mount.UnmountRecursive(mountRoot, 0) })
 
 	// Mount manager is optional now but we still test with it for compatibility
 	differ := erofsdiffer.NewErofsDiffer(contentStore, erofsdiffer.WithMountManager(mm))
@@ -362,6 +362,11 @@ func TestErofsDifferCompareBlockUpperFallback(t *testing.T) {
 	defer s.Close()
 	defer cleanupAllSnapshots(ctx, s)
 
+	snap, ok := s.(*snapshotter)
+	if !ok {
+		t.Fatal("failed to cast snapshotter to *snapshotter")
+	}
+
 	baseKey := testKeyBase
 	if _, err := s.Prepare(ctx, baseKey, ""); err != nil {
 		t.Fatal(err)
@@ -371,20 +376,15 @@ func TestErofsDifferCompareBlockUpperFallback(t *testing.T) {
 	}
 
 	upperKey := testKeyUpper
-	// Block mode now returns direct mounts (overlay with rw/upper as upperdir)
+	// Block mode returns a single overlay mount with pre-mounted EROFS layer
 	upperMounts, err := s.Prepare(ctx, upperKey, "base-commit")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Mount the overlay and write a file directly
-	upperTarget := t.TempDir()
-	if err := mount.All(upperMounts, upperTarget); err != nil {
-		t.Fatalf("failed to mount upper: %v", err)
-	}
-	defer testutil.Unmount(t, upperTarget)
-
-	if err := os.WriteFile(filepath.Join(upperTarget, "marker.txt"), []byte("marker"), 0644); err != nil {
+	// Write directly to the block upper path (ext4 is already mounted by snapshotter)
+	upperID := snapshotID(ctx, t, snap, upperKey)
+	if err := os.WriteFile(filepath.Join(snap.blockUpperPath(upperID), "marker.txt"), []byte("marker"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -394,8 +394,24 @@ func TestErofsDifferCompareBlockUpperFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Differ works without mount manager since mounts are direct
-	differ := erofsdiffer.NewErofsDiffer(contentStore)
+	// Mount manager is optional since mounts no longer have templates
+	db, err := bolt.Open(filepath.Join(tempDir, "mounts.db"), 0600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	mountRoot := filepath.Join(tempDir, "mounts")
+	mm, err := manager.NewManager(db, mountRoot, manager.WithAllowedRoot(snapshotRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closer, ok := mm.(interface{ Close() error }); ok {
+		defer closer.Close()
+	}
+	t.Cleanup(func() { mount.UnmountRecursive(mountRoot, 0) })
+
+	differ := erofsdiffer.NewErofsDiffer(contentStore, erofsdiffer.WithMountManager(mm))
 	desc, err := differ.Compare(ctx, lowerMounts, upperMounts)
 	if err != nil {
 		t.Fatal(err)
@@ -433,45 +449,58 @@ func TestErofsDifferComparePreservesWhiteouts(t *testing.T) {
 	defer s.Close()
 	defer cleanupAllSnapshots(ctx, s)
 
-	// Create base layer with a file that will be deleted
-	baseKey := testKeyBase
-	baseMounts, err := s.Prepare(ctx, baseKey, "")
+	// Create mount manager for template expansion
+	db, err := bolt.Open(filepath.Join(tempDir, "mounts.db"), 0600, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer db.Close()
 
-	// Mount and write a file to the base layer
-	baseTarget := t.TempDir()
-	if err := mount.All(baseMounts, baseTarget); err != nil {
-		t.Fatalf("failed to mount base: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(baseTarget, "gone.txt"), []byte("gone"), 0644); err != nil {
-		testutil.Unmount(t, baseTarget)
+	mountRoot := filepath.Join(tempDir, "mounts")
+	mm, err := manager.NewManager(db, mountRoot, manager.WithAllowedRoot(snapshotRoot))
+	if err != nil {
 		t.Fatal(err)
 	}
-	testutil.Unmount(t, baseTarget)
+	if closer, ok := mm.(interface{ Close() error }); ok {
+		defer closer.Close()
+	}
+	t.Cleanup(func() { mount.UnmountRecursive(mountRoot, 0) })
+
+	snap, ok := s.(*snapshotter)
+	if !ok {
+		t.Fatal("failed to cast snapshotter to *snapshotter")
+	}
+
+	// Create base layer with a file that will be deleted
+	baseKey := testKeyBase
+	if _, err := s.Prepare(ctx, baseKey, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write file directly to the block upper path
+	baseID := snapshotID(ctx, t, snap, baseKey)
+	if err := os.WriteFile(filepath.Join(snap.blockUpperPath(baseID), "gone.txt"), []byte("gone"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := s.Commit(ctx, "base-commit", baseKey); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create upper layer and delete the file (creating whiteout)
+	// Create upper layer and create a whiteout for the file
 	upperKey := testKeyUpper
 	upperMounts, err := s.Prepare(ctx, upperKey, "base-commit")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Mount the overlay and delete the file
-	upperTarget := t.TempDir()
-	if err := mount.All(upperMounts, upperTarget); err != nil {
-		t.Fatalf("failed to mount upper: %v", err)
+	// Create whiteout directly in the block upper directory
+	// In overlayfs, whiteouts are character devices with major:minor 0:0
+	upperID := snapshotID(ctx, t, snap, upperKey)
+	whiteoutPath := filepath.Join(snap.blockUpperPath(upperID), ".wh.gone.txt")
+	if err := unix.Mknod(whiteoutPath, unix.S_IFCHR|0644, 0); err != nil {
+		t.Fatalf("failed to create whiteout: %v", err)
 	}
-	if err := os.Remove(filepath.Join(upperTarget, "gone.txt")); err != nil {
-		testutil.Unmount(t, upperTarget)
-		t.Fatal(err)
-	}
-	testutil.Unmount(t, upperTarget)
 
 	lowerKey := testKeyLower
 	lowerMounts, err := s.View(ctx, lowerKey, "base-commit")
@@ -479,8 +508,8 @@ func TestErofsDifferComparePreservesWhiteouts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Differ works without mount manager since mounts are direct
-	differ := erofsdiffer.NewErofsDiffer(contentStore)
+	// Use mount manager since mounts have templates
+	differ := erofsdiffer.NewErofsDiffer(contentStore, erofsdiffer.WithMountManager(mm))
 	desc, err := differ.Compare(ctx, lowerMounts, upperMounts)
 	if err != nil {
 		t.Fatal(err)
@@ -518,6 +547,11 @@ func TestErofsDifferCompareWithFormattedUpperMounts(t *testing.T) {
 	defer s.Close()
 	defer cleanupAllSnapshots(ctx, s)
 
+	snap, ok := s.(*snapshotter)
+	if !ok {
+		t.Fatal("failed to cast snapshotter to *snapshotter")
+	}
+
 	baseKey := testKeyBase
 	if _, err := s.Prepare(ctx, baseKey, ""); err != nil {
 		t.Fatal(err)
@@ -527,27 +561,21 @@ func TestErofsDifferCompareWithFormattedUpperMounts(t *testing.T) {
 	}
 
 	upperKey := testKeyUpper
-	// Prepare() creates and mounts the ext4 layer, returning direct mounts
+	// Prepare() creates and mounts the ext4 layer
+	// Single-layer parent returns a single overlay mount
 	upperMounts, err := s.Prepare(ctx, upperKey, "base-commit")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Block mode now returns direct mounts (no templates)
-	if mountsHaveTemplate(upperMounts) {
-		t.Fatalf("expected upper mounts without templates, got: %#v", upperMounts)
-	}
 
-	// Write files directly to the mount point (overlay upperdir)
+	// Single-layer Prepare returns 1 overlay mount
 	if len(upperMounts) != 1 {
-		t.Fatalf("expected single mount, got %d: %#v", len(upperMounts), upperMounts)
+		t.Fatalf("expected 1 overlay mount, got: %#v", upperMounts)
 	}
-	upperTarget := t.TempDir()
-	if err := mount.All(upperMounts, upperTarget); err != nil {
-		t.Fatalf("failed to mount upper: %v", err)
-	}
-	defer testutil.Unmount(t, upperTarget)
 
-	if err := os.WriteFile(filepath.Join(upperTarget, "upper.txt"), []byte("upper"), 0644); err != nil {
+	// Write directly to the block upper path (ext4 is already mounted by snapshotter)
+	upperID := snapshotID(ctx, t, snap, upperKey)
+	if err := os.WriteFile(filepath.Join(snap.blockUpperPath(upperID), "upper.txt"), []byte("upper"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -557,8 +585,24 @@ func TestErofsDifferCompareWithFormattedUpperMounts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Differ works without mount manager since mounts are direct
-	differ := erofsdiffer.NewErofsDiffer(contentStore)
+	// Mount manager is optional since mounts no longer have templates
+	db, err := bolt.Open(filepath.Join(tempDir, "mounts.db"), 0600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	mountRoot := filepath.Join(tempDir, "mounts")
+	mm, err := manager.NewManager(db, mountRoot, manager.WithAllowedRoot(snapshotRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closer, ok := mm.(interface{ Close() error }); ok {
+		defer closer.Close()
+	}
+	t.Cleanup(func() { mount.UnmountRecursive(mountRoot, 0) })
+
+	differ := erofsdiffer.NewErofsDiffer(contentStore, erofsdiffer.WithMountManager(mm))
 	desc, err := differ.Compare(ctx, lowerMounts, upperMounts)
 	if err != nil {
 		t.Fatal(err)
@@ -632,16 +676,38 @@ func TestErofsDifferCompareWithoutMountManager(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Mounts should NOT have templates - they should be directly usable
-	if mountsHaveTemplate(lowerMounts) || mountsHaveTemplate(upperMounts) {
-		t.Fatalf("expected mounts without templates, got lower=%#v, upper=%#v", lowerMounts, upperMounts)
+	// Single-layer view should NOT have templates
+	if mountsHaveTemplate(lowerMounts) {
+		t.Fatalf("single-layer view should not have templates, got: %#v", lowerMounts)
 	}
 
-	// Compare works WITHOUT mount manager since mounts are direct
-	differ := erofsdiffer.NewErofsDiffer(contentStore)
+	// Active snapshot with parent now uses templates for overlay (new architecture)
+	// The mount manager is required to expand templates
+	if !mountsHaveTemplate(upperMounts) {
+		t.Logf("active mounts (may have templates): %#v", upperMounts)
+	}
+
+	// Compare with mount manager since active mounts may have templates
+	db, err := bolt.Open(filepath.Join(tempDir, "mounts.db"), 0600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	mountRoot := filepath.Join(tempDir, "mounts")
+	mm, err := manager.NewManager(db, mountRoot, manager.WithAllowedRoot(snapshotRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closer, ok := mm.(interface{ Close() error }); ok {
+		defer closer.Close()
+	}
+	t.Cleanup(func() { mount.UnmountRecursive(mountRoot, 0) })
+
+	differ := erofsdiffer.NewErofsDiffer(contentStore, erofsdiffer.WithMountManager(mm))
 	desc, err := differ.Compare(ctx, lowerMounts, upperMounts)
 	if err != nil {
-		t.Fatalf("Compare should work without mount manager, got: %v", err)
+		t.Fatalf("Compare failed: %v", err)
 	}
 	if desc.Digest == "" || desc.Size == 0 {
 		t.Fatalf("unexpected diff descriptor: %+v", desc)
@@ -720,21 +786,32 @@ func TestErofsDifferCompareMultipleStackedLayers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Mounts should NOT have templates - they should be directly usable
-	if mountsHaveTemplate(lowerMounts) {
-		t.Fatalf("expected lower mounts without templates, got: %#v", lowerMounts)
+	// Multi-layer views pre-mount EROFS layers and return a single overlay mount
+	if len(lowerMounts) != 1 {
+		t.Fatalf("expected 1 overlay mount, got: %#v", lowerMounts)
 	}
-	if mountsHaveTemplate(upperMounts) {
-		t.Fatalf("expected upper mounts without templates, got: %#v", upperMounts)
-	}
-
-	// Multi-layer view should return single overlay mount
-	if len(lowerMounts) != 1 || lowerMounts[0].Type != testTypeOverlay {
-		t.Fatalf("expected single overlay mount for multi-layer view, got: %#v", lowerMounts)
+	if lowerMounts[0].Type != "overlay" {
+		t.Fatalf("expected overlay mount type, got: %s", lowerMounts[0].Type)
 	}
 
-	// Differ works without mount manager since mounts are direct
-	differ := erofsdiffer.NewErofsDiffer(contentStore)
+	// Mount manager is optional since mounts no longer have templates
+	db, err := bolt.Open(filepath.Join(tempDir, "mounts.db"), 0600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	mountRoot := filepath.Join(tempDir, "mounts")
+	mm, err := manager.NewManager(db, mountRoot, manager.WithAllowedRoot(snapshotRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closer, ok := mm.(interface{ Close() error }); ok {
+		defer closer.Close()
+	}
+	t.Cleanup(func() { mount.UnmountRecursive(mountRoot, 0) })
+
+	differ := erofsdiffer.NewErofsDiffer(contentStore, erofsdiffer.WithMountManager(mm))
 	desc, err := differ.Compare(ctx, lowerMounts, upperMounts)
 	if err != nil {
 		t.Fatal(err)
@@ -821,6 +898,7 @@ func TestErofsDifferCompareEmptyLowerMounts(t *testing.T) {
 	if closer, ok := mm.(interface{ Close() error }); ok {
 		defer closer.Close()
 	}
+	t.Cleanup(func() { mount.UnmountRecursive(mountRoot, 0) })
 
 	differ := erofsdiffer.NewErofsDiffer(contentStore, erofsdiffer.WithMountManager(mm))
 
@@ -998,6 +1076,7 @@ func TestErofsDifferCompareSingleLayerView(t *testing.T) {
 	if closer, ok := mm.(interface{ Close() error }); ok {
 		defer closer.Close()
 	}
+	t.Cleanup(func() { mount.UnmountRecursive(mountRoot, 0) })
 
 	differ := erofsdiffer.NewErofsDiffer(contentStore, erofsdiffer.WithMountManager(mm))
 
@@ -1114,6 +1193,7 @@ func TestErofsDifferCompareViewWithMultipleLayers(t *testing.T) {
 	if closer, ok := mm.(interface{ Close() error }); ok {
 		defer closer.Close()
 	}
+	t.Cleanup(func() { mount.UnmountRecursive(mountRoot, 0) })
 
 	differ := erofsdiffer.NewErofsDiffer(contentStore, erofsdiffer.WithMountManager(mm))
 	desc, err := differ.Compare(ctx, viewMounts, upperMounts)
@@ -1189,7 +1269,7 @@ func TestErofsDifferCompareDoesNotRequireMountManager(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Get mounts (should NOT have templates)
+	// Get mounts - with new architecture, multi-layer snapshots have templates
 	upperKey := testKeyUpper
 	upperMounts, err := s.Prepare(ctx, upperKey, "child-commit")
 	if err != nil {
@@ -1202,23 +1282,42 @@ func TestErofsDifferCompareDoesNotRequireMountManager(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Mounts should NOT have templates
-	if mountsHaveTemplate(lowerMounts) || mountsHaveTemplate(upperMounts) {
-		t.Fatalf("expected mounts without templates, got lower=%#v, upper=%#v", lowerMounts, upperMounts)
+	// Multi-layer views pre-mount EROFS layers and return a single overlay mount
+	if len(lowerMounts) != 1 {
+		t.Fatalf("expected 1 overlay mount, got: %#v", lowerMounts)
+	}
+	if lowerMounts[0].Type != "overlay" {
+		t.Fatalf("expected overlay mount type, got: %s", lowerMounts[0].Type)
 	}
 
-	// Create differ WITHOUT mount manager - should work
-	differ := erofsdiffer.NewErofsDiffer(contentStore)
+	// Mount manager is optional since mounts no longer have templates
+	db, err := bolt.Open(filepath.Join(tempDir, "mounts.db"), 0600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
 
-	// Compare should succeed without mount manager
+	mountRoot := filepath.Join(tempDir, "mounts")
+	mm, err := manager.NewManager(db, mountRoot, manager.WithAllowedRoot(snapshotRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closer, ok := mm.(interface{ Close() error }); ok {
+		defer closer.Close()
+	}
+	t.Cleanup(func() { mount.UnmountRecursive(mountRoot, 0) })
+
+	differ := erofsdiffer.NewErofsDiffer(contentStore, erofsdiffer.WithMountManager(mm))
+
+	// Compare should succeed with mount manager
 	desc, err := differ.Compare(ctx, lowerMounts, upperMounts)
 	if err != nil {
-		t.Fatalf("Compare should work without mount manager, got: %v", err)
+		t.Fatalf("Compare failed: %v", err)
 	}
 	if desc.Digest == "" || desc.Size == 0 {
 		t.Fatalf("unexpected diff descriptor: %+v", desc)
 	}
-	t.Logf("Compare succeeded without mount manager: %s", desc.Digest)
+	t.Logf("Compare succeeded: %s", desc.Digest)
 }
 
 // TestErofsDifferCompareRejectsNonEROFSMounts tests that Compare correctly

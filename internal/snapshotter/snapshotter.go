@@ -221,6 +221,12 @@ func (s *snapshotter) workPath(id string) string {
 	return filepath.Join(s.root, "snapshots", id, "work")
 }
 
+// layerMountPath returns the mount path for a specific layer in a snapshot.
+// Layers are indexed from 0 (bottom/oldest) to N (top/newest).
+func (s *snapshotter) layerMountPath(id string, layerIndex int) string {
+	return filepath.Join(s.root, "snapshots", id, "layers", fmt.Sprintf("%d", layerIndex))
+}
+
 func (s *snapshotter) writablePath(id string) string {
 	return filepath.Join(s.root, "snapshots", id, "rwlayer.img")
 }
@@ -544,11 +550,9 @@ func (s *snapshotter) getErofsLayerPaths(snap storage.Snapshot) ([]string, error
 	return paths, nil
 }
 
-// viewMounts returns EROFS mount descriptors for KindView snapshots with multiple layers.
-// Each layer is returned as a separate EROFS mount, combined with an overlay.
-//
-// For host mounting, the mount manager loop-attaches each layer separately.
-// For qemubox, each layer becomes a separate virtio-blk disk.
+// viewMounts returns mounts for KindView snapshots.
+// For single-layer views, returns a single EROFS mount.
+// For multi-layer views, mounts all layers and returns an overlay.
 func (s *snapshotter) viewMounts(snap storage.Snapshot) ([]mount.Mount, error) {
 	// Check if we have a merged fsmeta that collapses all layers into one
 	if s.fsMergeThreshold > 0 {
@@ -557,119 +561,117 @@ func (s *snapshotter) viewMounts(snap storage.Snapshot) ([]mount.Mount, error) {
 		}
 	}
 
-	// Get EROFS layer paths without mounting
+	// Get EROFS layer paths
 	layerPaths, err := s.getErofsLayerPaths(snap)
 	if err != nil {
 		return nil, err
 	}
 
-	// Return separate EROFS mount per layer, combined with overlay.
-	// Layers are ordered from bottom (oldest) to top (newest).
-	// The "loop" option allows direct mounting on hosts (differ, tests).
-	// Consumers like qemubox strip "loop" when transforming to virtio-blk.
-	var mounts []mount.Mount
-	for i := len(layerPaths) - 1; i >= 0; i-- {
-		mounts = append(mounts, mount.Mount{
-			Source:  layerPaths[i],
+	// Single layer: return EROFS mount directly
+	if len(layerPaths) == 1 {
+		return []mount.Mount{{
+			Source:  layerPaths[0],
 			Type:    "erofs",
 			Options: []string{"ro", "loop"},
-		})
+		}}, nil
 	}
 
-	// For multi-layer views, add overlay to combine layers (read-only)
-	if len(mounts) > 1 {
-		mounts = append(mounts, mount.Mount{
-			Type:    "format/overlay",
-			Source:  "overlay",
-			Options: []string{fmt.Sprintf("lowerdir={{ overlay 0 %d }}", len(mounts)-1)},
-		})
+	// Multi-layer: mount each layer and return overlay
+	// Layers are ordered from bottom (oldest) to top (newest).
+	var lowerdirs []string
+	for i := len(layerPaths) - 1; i >= 0; i-- {
+		mountPath := s.layerMountPath(snap.ID, len(layerPaths)-1-i)
+		if err := mountErofsLayer(layerPaths[i], mountPath); err != nil {
+			// Cleanup already mounted layers on error
+			for j := len(layerPaths) - 1; j > i; j-- {
+				unmountAll(s.layerMountPath(snap.ID, len(layerPaths)-1-j))
+			}
+			return nil, err
+		}
+		lowerdirs = append(lowerdirs, mountPath)
 	}
 
-	return mounts, nil
+	// Return overlay combining all layers (read-only)
+	return []mount.Mount{{
+		Type:    "overlay",
+		Source:  "overlay",
+		Options: []string{"lowerdir=" + strings.Join(lowerdirs, ":")},
+	}}, nil
 }
 
-// activeMounts returns EROFS mount descriptors and overlay configuration for active snapshots.
-// Each layer is a separate EROFS mount, combined with overlay including writable layer.
-//
-// For host mounting, the mount manager loop-attaches each layer separately.
-// For qemubox, each layer becomes a separate virtio-blk disk.
+// activeMounts returns mounts for active (writable) snapshots.
+// Mounts all parent layers and returns an overlay with writable upper.
 func (s *snapshotter) activeMounts(snap storage.Snapshot) ([]mount.Mount, error) {
 	// Check if we have a merged fsmeta that collapses all layers into one
 	if s.fsMergeThreshold > 0 {
 		if m, ok := s.mountFsMeta(snap, 0); ok {
-			return s.activeOverlayMounts(snap, []mount.Mount{m})
+			return s.activeOverlayMounts(snap, []string{m.Source}, true)
 		}
 	}
 
-	// Get EROFS layer paths without mounting
+	// Get EROFS layer paths
 	layerPaths, err := s.getErofsLayerPaths(snap)
 	if err != nil {
 		return nil, err
 	}
 
-	// Build separate EROFS mount per layer (bottom to top order).
-	// The "loop" option allows direct mounting on hosts (differ, tests).
-	// Consumers like qemubox strip "loop" when transforming to virtio-blk.
-	var erofsMounts []mount.Mount
-	for i := len(layerPaths) - 1; i >= 0; i-- {
-		erofsMounts = append(erofsMounts, mount.Mount{
-			Source:  layerPaths[i],
-			Type:    "erofs",
-			Options: []string{"ro", "loop"},
-		})
+	// No parent layers: return just the upper directory as bind mount
+	if len(layerPaths) == 0 {
+		var upperPath string
+		if s.isBlockMode() {
+			upperPath = s.blockUpperPath(snap.ID)
+		} else {
+			upperPath = s.upperPath(snap.ID)
+		}
+		return []mount.Mount{{
+			Type:    "bind",
+			Source:  upperPath,
+			Options: []string{"rw", "rbind"},
+		}}, nil
 	}
 
-	return s.activeOverlayMounts(snap, erofsMounts)
+	// Mount each layer and collect mount paths
+	var lowerdirs []string
+	for i := len(layerPaths) - 1; i >= 0; i-- {
+		mountPath := s.layerMountPath(snap.ID, len(layerPaths)-1-i)
+		if err := mountErofsLayer(layerPaths[i], mountPath); err != nil {
+			// Cleanup already mounted layers on error
+			for j := len(layerPaths) - 1; j > i; j-- {
+				unmountAll(s.layerMountPath(snap.ID, len(layerPaths)-1-j))
+			}
+			return nil, err
+		}
+		lowerdirs = append(lowerdirs, mountPath)
+	}
+
+	return s.activeOverlayMounts(snap, lowerdirs, false)
 }
 
 // activeOverlayMounts builds the writable overlay configuration for an active snapshot.
-// It takes the lower EROFS mount(s) and adds the writable layer and overlay mount.
-func (s *snapshotter) activeOverlayMounts(snap storage.Snapshot, lowerMounts []mount.Mount) ([]mount.Mount, error) {
-	numLowers := len(lowerMounts)
-
-	var mounts []mount.Mount
-	mounts = append(mounts, lowerMounts...)
-
-	// Build overlay options with templates for lower layers
-	// The {{ mount N }} or {{ overlay 0 N }} templates are expanded by the mount manager
-	var overlayOptions []string
-	if numLowers == 1 {
-		overlayOptions = append(overlayOptions, "lowerdir={{ mount 0 }}")
+// lowerdirs are the mounted paths for lower layers (already mounted).
+// isFsmeta indicates if the lower is a merged fsmeta mount (needs special handling).
+func (s *snapshotter) activeOverlayMounts(snap storage.Snapshot, lowerdirs []string, isFsmeta bool) ([]mount.Mount, error) {
+	var upperPath, workPath string
+	if s.isBlockMode() {
+		upperPath = s.blockUpperPath(snap.ID)
+		workPath = s.blockWorkPath(snap.ID)
 	} else {
-		overlayOptions = append(overlayOptions, fmt.Sprintf("lowerdir={{ overlay 0 %d }}", numLowers-1))
+		upperPath = s.upperPath(snap.ID)
+		workPath = s.workPath(snap.ID)
 	}
 
-	// Determine upper/work paths and overlay type based on mode
-	var overlayType string
-	if s.isBlockMode() {
-		// Block mode: ext4 is already mounted by snapshotter at blockRwMountPath.
-		// Use real paths for upper/work (already created by snapshotter).
-		// The "loop" option in ext4 mount descriptor is for qemubox to strip;
-		// host mounting uses the already-mounted paths directly.
-		overlayOptions = append(overlayOptions,
-			fmt.Sprintf("upperdir=%s", s.blockUpperPath(snap.ID)),
-			fmt.Sprintf("workdir=%s", s.blockWorkPath(snap.ID)),
-		)
-		// format/overlay expands the lowerdir template
-		overlayType = "format/overlay"
-	} else {
-		// Directory mode: use host paths directly
-		overlayOptions = append(overlayOptions,
-			fmt.Sprintf("upperdir=%s", s.upperPath(snap.ID)),
-			fmt.Sprintf("workdir=%s", s.workPath(snap.ID)),
-		)
-		// format/overlay expands the lowerdir template
-		overlayType = "format/overlay"
+	overlayOptions := []string{
+		"lowerdir=" + strings.Join(lowerdirs, ":"),
+		"upperdir=" + upperPath,
+		"workdir=" + workPath,
 	}
 	overlayOptions = append(overlayOptions, s.ovlOptions...)
 
-	mounts = append(mounts, mount.Mount{
-		Type:    overlayType,
+	return []mount.Mount{{
+		Type:    "overlay",
 		Source:  "overlay",
 		Options: overlayOptions,
-	})
-
-	return mounts, nil
+	}}, nil
 }
 
 func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, key, parent string, opts []snapshots.Opt) (_ []mount.Mount, err error) {
@@ -1008,6 +1010,17 @@ func (s *snapshotter) Remove(ctx context.Context, key string) (err error) {
 	// key no longer available.
 	defer func() {
 		if err == nil {
+			// Cleanup layer mounts (from viewMounts/activeMounts)
+			layersDir := filepath.Join(s.root, "snapshots", id, "layers")
+			if entries, derr := os.ReadDir(layersDir); derr == nil {
+				for _, entry := range entries {
+					layerMount := filepath.Join(layersDir, entry.Name())
+					if uerr := unmountAll(layerMount); uerr != nil {
+						log.G(ctx).WithError(uerr).WithField("path", layerMount).Warn("failed to unmount layer")
+					}
+				}
+			}
+
 			// Cleanup directory mode upper mounts
 			if err := cleanupUpper(s.upperPath(id)); err != nil {
 				log.G(ctx).WithError(err).WithField("id", id).Warnf("failed to cleanup upperdir")

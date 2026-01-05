@@ -31,8 +31,10 @@ import (
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/contrib/diffservice"
 	"github.com/containerd/containerd/v2/contrib/snapshotservice"
+	"github.com/containerd/containerd/v2/core/mount/manager"
 	"github.com/containerd/log"
 	"github.com/urfave/cli/v2"
+	bolt "go.etcd.io/bbolt"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/grpclog"
 
@@ -210,6 +212,25 @@ func run(cliCtx *cli.Context) error {
 	if opts := cliCtx.StringSlice("mkfs-options"); len(opts) > 0 {
 		differOpts = append(differOpts, differ.WithMkfsOptions(opts))
 	}
+
+	dbPath := filepath.Join(root, "mounts.db")
+	db, err := bolt.Open(dbPath, 0600, nil)
+	if err != nil {
+		return fmt.Errorf("failed to open mount database: %w", err)
+	}
+	defer db.Close()
+
+	mountRoot := filepath.Join(root, "mounts")
+	mm, err := manager.NewManager(db, mountRoot, manager.WithAllowedRoot(root))
+	if err != nil {
+		return fmt.Errorf("failed to create mount manager: %w", err)
+	}
+	if closer, ok := mm.(interface{ Close() error }); ok {
+		defer closer.Close()
+	}
+
+	// Add mount manager to differ options for template resolution
+	differOpts = append(differOpts, differ.WithMountManager(mm))
 
 	// Create differ
 	df := differ.NewErofsDiffer(contentStore, differOpts...)
