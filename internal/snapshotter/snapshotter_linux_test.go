@@ -70,10 +70,14 @@ const (
 // It provides helpers for creating layers, views, and managing cleanup.
 type snapshotTestEnv struct {
 	t            *testing.T
-	ctx          context.Context
 	tempDir      string
 	snapshotRoot string
 	snapshotter  *snapshotter
+}
+
+// ctx returns the test context.
+func (e *snapshotTestEnv) ctx() context.Context {
+	return e.t.Context()
 }
 
 // newSnapshotTestEnv creates a new test environment with all prerequisites checked.
@@ -81,7 +85,6 @@ type snapshotTestEnv struct {
 func newSnapshotTestEnv(t *testing.T, opts ...Opt) *snapshotTestEnv {
 	t.Helper()
 	testutil.RequiresRoot(t)
-	ctx := t.Context()
 
 	if _, err := exec.LookPath("mkfs.erofs"); err != nil {
 		t.Skipf("could not find mkfs.erofs: %v", err)
@@ -105,14 +108,13 @@ func newSnapshotTestEnv(t *testing.T, opts ...Opt) *snapshotTestEnv {
 
 	env := &snapshotTestEnv{
 		t:            t,
-		ctx:          ctx,
 		tempDir:      tempDir,
 		snapshotRoot: snapshotRoot,
 		snapshotter:  snap,
 	}
 
 	t.Cleanup(func() {
-		cleanupAllSnapshots(ctx, s)
+		cleanupAllSnapshots(t.Context(), s)
 		s.Close()
 		mount.UnmountRecursive(snapshotRoot, 0)
 	})
@@ -125,18 +127,18 @@ func newSnapshotTestEnv(t *testing.T, opts ...Opt) *snapshotTestEnv {
 func (e *snapshotTestEnv) createLayer(key, parentKey, filename, content string) string {
 	e.t.Helper()
 
-	if _, err := e.snapshotter.Prepare(e.ctx, key, parentKey); err != nil {
+	if _, err := e.snapshotter.Prepare(e.ctx(), key, parentKey); err != nil {
 		e.t.Fatalf("failed to prepare %s: %v", key, err)
 	}
 
-	id := snapshotID(e.ctx, e.t, e.snapshotter, key)
+	id := snapshotID(e.ctx(), e.t, e.snapshotter, key)
 	filePath := filepath.Join(e.snapshotter.blockUpperPath(id), filename)
 	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
 		e.t.Fatalf("failed to write %s: %v", filename, err)
 	}
 
 	commitKey := key + "-commit"
-	if err := e.snapshotter.Commit(e.ctx, commitKey, key); err != nil {
+	if err := e.snapshotter.Commit(e.ctx(), commitKey, key); err != nil {
 		e.t.Fatalf("failed to commit %s: %v", key, err)
 	}
 
@@ -148,18 +150,18 @@ func (e *snapshotTestEnv) createLayer(key, parentKey, filename, content string) 
 func (e *snapshotTestEnv) createLayerWithLabels(key, parentKey, filename, content string, labels map[string]string) string {
 	e.t.Helper()
 
-	if _, err := e.snapshotter.Prepare(e.ctx, key, parentKey, snapshots.WithLabels(labels)); err != nil {
+	if _, err := e.snapshotter.Prepare(e.ctx(), key, parentKey, snapshots.WithLabels(labels)); err != nil {
 		e.t.Fatalf("failed to prepare %s: %v", key, err)
 	}
 
-	id := snapshotID(e.ctx, e.t, e.snapshotter, key)
+	id := snapshotID(e.ctx(), e.t, e.snapshotter, key)
 	filePath := filepath.Join(e.snapshotter.blockUpperPath(id), filename)
 	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
 		e.t.Fatalf("failed to write %s: %v", filename, err)
 	}
 
 	commitKey := key + "-commit"
-	if err := e.snapshotter.Commit(e.ctx, commitKey, key); err != nil {
+	if err := e.snapshotter.Commit(e.ctx(), commitKey, key); err != nil {
 		e.t.Fatalf("failed to commit %s: %v", key, err)
 	}
 
@@ -170,69 +172,12 @@ func (e *snapshotTestEnv) createLayerWithLabels(key, parentKey, filename, conten
 func (e *snapshotTestEnv) createView(key, parentKey string) []mount.Mount {
 	e.t.Helper()
 
-	mounts, err := e.snapshotter.View(e.ctx, key, parentKey)
+	mounts, err := e.snapshotter.View(e.ctx(), key, parentKey)
 	if err != nil {
 		e.t.Fatalf("failed to create view %s: %v", key, err)
 	}
 
 	return mounts
-}
-
-// prepareActiveLayer prepares an active (uncommitted) layer and writes a file to it.
-// Returns the mounts for use in comparisons.
-func (e *snapshotTestEnv) prepareActiveLayer(key, parentKey, filename, content string) []mount.Mount {
-	e.t.Helper()
-
-	mounts, err := e.snapshotter.Prepare(e.ctx, key, parentKey)
-	if err != nil {
-		e.t.Fatalf("failed to prepare %s: %v", key, err)
-	}
-
-	id := snapshotID(e.ctx, e.t, e.snapshotter, key)
-	filePath := filepath.Join(e.snapshotter.blockUpperPath(id), filename)
-	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
-		e.t.Fatalf("failed to write %s: %v", filename, err)
-	}
-
-	return mounts
-}
-
-// prepareActiveLayerWithLabels prepares an active layer with labels and writes a file to it.
-func (e *snapshotTestEnv) prepareActiveLayerWithLabels(key, parentKey, filename, content string, labels map[string]string) []mount.Mount {
-	e.t.Helper()
-
-	mounts, err := e.snapshotter.Prepare(e.ctx, key, parentKey, snapshots.WithLabels(labels))
-	if err != nil {
-		e.t.Fatalf("failed to prepare %s: %v", key, err)
-	}
-
-	id := snapshotID(e.ctx, e.t, e.snapshotter, key)
-	filePath := filepath.Join(e.snapshotter.blockUpperPath(id), filename)
-	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
-		e.t.Fatalf("failed to write %s: %v", filename, err)
-	}
-
-	return mounts
-}
-
-// writeToActiveLayer writes a file to an existing active layer.
-func (e *snapshotTestEnv) writeToActiveLayer(key, filename, content string) {
-	e.t.Helper()
-
-	id := snapshotID(e.ctx, e.t, e.snapshotter, key)
-	filePath := filepath.Join(e.snapshotter.blockUpperPath(id), filename)
-	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
-		e.t.Fatalf("failed to write %s: %v", filename, err)
-	}
-}
-
-// commitLayer commits an active snapshot.
-func (e *snapshotTestEnv) commitLayer(commitKey, activeKey string) {
-	e.t.Helper()
-
-	if err := e.snapshotter.Commit(e.ctx, commitKey, activeKey); err != nil {
-		e.t.Fatalf("failed to commit %s: %v", activeKey, err)
-	}
 }
 
 func newSnapshotter(t *testing.T, opts ...Opt) func(ctx context.Context, root string) (snapshots.Snapshotter, func() error, error) {

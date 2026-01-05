@@ -77,11 +77,15 @@ const (
 // It provides helpers for creating layers, mount managers, and running comparisons.
 type differTestEnv struct {
 	t            *testing.T
-	ctx          context.Context
 	tempDir      string
 	snapshotRoot string
 	snapshotter  *snapshotter
 	contentStore content.Store
+}
+
+// ctx returns the test context with the testsuite namespace.
+func (e *differTestEnv) ctx() context.Context {
+	return namespaces.WithNamespace(e.t.Context(), "testsuite")
 }
 
 // newDifferTestEnv creates a new test environment with all prerequisites checked.
@@ -114,7 +118,6 @@ func newDifferTestEnv(t *testing.T) *differTestEnv {
 
 	env := &differTestEnv{
 		t:            t,
-		ctx:          ctx,
 		tempDir:      tempDir,
 		snapshotRoot: snapshotRoot,
 		snapshotter:  snap,
@@ -159,7 +162,6 @@ func newDifferTestEnvWithBlockMode(t *testing.T) *differTestEnv {
 
 	env := &differTestEnv{
 		t:            t,
-		ctx:          ctx,
 		tempDir:      tempDir,
 		snapshotRoot: snapshotRoot,
 		snapshotter:  snap,
@@ -204,18 +206,18 @@ func (e *differTestEnv) createMountManager() mount.Manager {
 func (e *differTestEnv) createLayer(key, parentKey, filename, content string) string {
 	e.t.Helper()
 
-	if _, err := e.snapshotter.Prepare(e.ctx, key, parentKey); err != nil {
+	if _, err := e.snapshotter.Prepare(e.ctx(), key, parentKey); err != nil {
 		e.t.Fatalf("failed to prepare %s: %v", key, err)
 	}
 
-	id := snapshotID(e.ctx, e.t, e.snapshotter, key)
+	id := snapshotID(e.ctx(), e.t, e.snapshotter, key)
 	filePath := filepath.Join(e.snapshotter.blockUpperPath(id), filename)
 	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
 		e.t.Fatalf("failed to write %s: %v", filename, err)
 	}
 
 	commitKey := key + "-commit"
-	if err := e.snapshotter.Commit(e.ctx, commitKey, key); err != nil {
+	if err := e.snapshotter.Commit(e.ctx(), commitKey, key); err != nil {
 		e.t.Fatalf("failed to commit %s: %v", key, err)
 	}
 
@@ -227,18 +229,18 @@ func (e *differTestEnv) createLayer(key, parentKey, filename, content string) st
 func (e *differTestEnv) createBlockLayer(key, parentKey, filename, content string) string {
 	e.t.Helper()
 
-	if _, err := e.snapshotter.Prepare(e.ctx, key, parentKey); err != nil {
+	if _, err := e.snapshotter.Prepare(e.ctx(), key, parentKey); err != nil {
 		e.t.Fatalf("failed to prepare %s: %v", key, err)
 	}
 
-	id := snapshotID(e.ctx, e.t, e.snapshotter, key)
+	id := snapshotID(e.ctx(), e.t, e.snapshotter, key)
 	filePath := filepath.Join(e.snapshotter.blockUpperPath(id), filename)
 	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
 		e.t.Fatalf("failed to write %s: %v", filename, err)
 	}
 
 	commitKey := key + "-commit"
-	if err := e.snapshotter.Commit(e.ctx, commitKey, key); err != nil {
+	if err := e.snapshotter.Commit(e.ctx(), commitKey, key); err != nil {
 		e.t.Fatalf("failed to commit %s: %v", key, err)
 	}
 
@@ -250,12 +252,12 @@ func (e *differTestEnv) createBlockLayer(key, parentKey, filename, content strin
 func (e *differTestEnv) prepareActiveLayer(key, parentKey, filename, content string) []mount.Mount {
 	e.t.Helper()
 
-	mounts, err := e.snapshotter.Prepare(e.ctx, key, parentKey)
+	mounts, err := e.snapshotter.Prepare(e.ctx(), key, parentKey)
 	if err != nil {
 		e.t.Fatalf("failed to prepare %s: %v", key, err)
 	}
 
-	id := snapshotID(e.ctx, e.t, e.snapshotter, key)
+	id := snapshotID(e.ctx(), e.t, e.snapshotter, key)
 	filePath := filepath.Join(e.snapshotter.blockUpperPath(id), filename)
 	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
 		e.t.Fatalf("failed to write %s: %v", filename, err)
@@ -269,12 +271,12 @@ func (e *differTestEnv) prepareActiveLayer(key, parentKey, filename, content str
 func (e *differTestEnv) prepareActiveBlockLayer(key, parentKey, filename, content string) []mount.Mount {
 	e.t.Helper()
 
-	mounts, err := e.snapshotter.Prepare(e.ctx, key, parentKey)
+	mounts, err := e.snapshotter.Prepare(e.ctx(), key, parentKey)
 	if err != nil {
 		e.t.Fatalf("failed to prepare %s: %v", key, err)
 	}
 
-	id := snapshotID(e.ctx, e.t, e.snapshotter, key)
+	id := snapshotID(e.ctx(), e.t, e.snapshotter, key)
 	filePath := filepath.Join(e.snapshotter.blockUpperPath(id), filename)
 	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
 		e.t.Fatalf("failed to write %s: %v", filename, err)
@@ -287,7 +289,7 @@ func (e *differTestEnv) prepareActiveBlockLayer(key, parentKey, filename, conten
 func (e *differTestEnv) createView(key, parentKey string) []mount.Mount {
 	e.t.Helper()
 
-	mounts, err := e.snapshotter.View(e.ctx, key, parentKey)
+	mounts, err := e.snapshotter.View(e.ctx(), key, parentKey)
 	if err != nil {
 		e.t.Fatalf("failed to create view %s: %v", key, err)
 	}
@@ -299,7 +301,7 @@ func (e *differTestEnv) createView(key, parentKey string) []mount.Mount {
 func (e *differTestEnv) compareAndVerify(differ *erofsdiffer.ErofsDiff, lower, upper []mount.Mount, expectedFiles ...string) ocispec.Descriptor {
 	e.t.Helper()
 
-	desc, err := differ.Compare(e.ctx, lower, upper)
+	desc, err := differ.Compare(e.ctx(), lower, upper)
 	if err != nil {
 		e.t.Fatalf("Compare failed: %v", err)
 	}
@@ -308,7 +310,7 @@ func (e *differTestEnv) compareAndVerify(differ *erofsdiffer.ErofsDiff, lower, u
 	}
 
 	for _, file := range expectedFiles {
-		found, err := tarHasPath(e.ctx, e.contentStore, desc, file)
+		found, err := tarHasPath(e.ctx(), e.contentStore, desc, file)
 		if err != nil {
 			e.t.Fatal(err)
 		}
@@ -504,10 +506,10 @@ func TestErofsDifferCompareBlockUpperFallback(t *testing.T) {
 	env := newDifferTestEnvWithBlockMode(t)
 
 	// Create empty base layer (block mode needs committed parent)
-	if _, err := env.snapshotter.Prepare(env.ctx, testKeyBase, ""); err != nil {
+	if _, err := env.snapshotter.Prepare(env.ctx(), testKeyBase, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := env.snapshotter.Commit(env.ctx, "base-commit", testKeyBase); err != nil {
+	if err := env.snapshotter.Commit(env.ctx(), "base-commit", testKeyBase); err != nil {
 		t.Fatal(err)
 	}
 
@@ -527,7 +529,7 @@ func TestErofsDifferComparePreservesWhiteouts(t *testing.T) {
 	env.createBlockLayer(testKeyBase, "", "gone.txt", "gone")
 
 	// Create upper layer with a whiteout
-	upperMounts, err := env.snapshotter.Prepare(env.ctx, testKeyUpper, "base-commit")
+	upperMounts, err := env.snapshotter.Prepare(env.ctx(), testKeyUpper, "base-commit")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -535,7 +537,7 @@ func TestErofsDifferComparePreservesWhiteouts(t *testing.T) {
 	// Create whiteout (character device 0:0) in block upper directory.
 	// In overlayfs, whiteouts are char devices 0:0 with the original filename.
 	// The .wh. prefix is only added when converting to tar format.
-	upperID := snapshotID(env.ctx, t, env.snapshotter, testKeyUpper)
+	upperID := snapshotID(env.ctx(), t, env.snapshotter, testKeyUpper)
 	whiteoutPath := filepath.Join(env.snapshotter.blockUpperPath(upperID), "gone.txt")
 	if err := unix.Mknod(whiteoutPath, unix.S_IFCHR|0644, 0); err != nil {
 		t.Fatalf("failed to create whiteout: %v", err)
@@ -552,10 +554,10 @@ func TestErofsDifferCompareWithFormattedUpperMounts(t *testing.T) {
 	env := newDifferTestEnvWithBlockMode(t)
 
 	// Create empty base layer
-	if _, err := env.snapshotter.Prepare(env.ctx, testKeyBase, ""); err != nil {
+	if _, err := env.snapshotter.Prepare(env.ctx(), testKeyBase, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := env.snapshotter.Commit(env.ctx, "base-commit", testKeyBase); err != nil {
+	if err := env.snapshotter.Commit(env.ctx(), "base-commit", testKeyBase); err != nil {
 		t.Fatal(err)
 	}
 
@@ -665,7 +667,7 @@ func TestErofsDifferCompareContextCancellation(t *testing.T) {
 	differ := erofsdiffer.NewErofsDiffer(env.contentStore)
 
 	// Create a cancelled context
-	ctx, cancel := context.WithCancel(env.ctx)
+	ctx, cancel := context.WithCancel(env.ctx())
 	cancel() // Cancel immediately
 
 	// Compare with cancelled context - may fail or complete quickly
@@ -750,4 +752,3 @@ func TestErofsDifferCompareDoesNotRequireMountManager(t *testing.T) {
 	desc := env.compareAndVerify(differ, lowerMounts, upperMounts)
 	t.Logf("Compare succeeded: %s", desc.Digest)
 }
-

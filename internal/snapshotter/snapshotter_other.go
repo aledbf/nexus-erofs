@@ -21,7 +21,6 @@ package erofs
 import (
 	"context"
 
-	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/errdefs"
 )
 
@@ -43,10 +42,6 @@ func unmountAll(target string) error {
 }
 
 func mountErofsLayer(layerPath, mountPoint string) error {
-	return errdefs.ErrNotImplemented
-}
-
-func mountErofsWithOptions(m mount.Mount, mountPoint string) error {
 	return errdefs.ErrNotImplemented
 }
 

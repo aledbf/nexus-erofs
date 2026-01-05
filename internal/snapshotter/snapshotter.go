@@ -559,8 +559,8 @@ func (s *snapshotter) viewMounts(snap storage.Snapshot) ([]mount.Mount, error) {
 		mountPath := s.layerMountPath(snap.ID, i)
 		if err := mountErofsLayer(layerPath, mountPath); err != nil {
 			// Cleanup already mounted layers on error
-			for j := 0; j < i; j++ {
-				unmountAll(s.layerMountPath(snap.ID, j))
+			for j := range i {
+				_ = unmountAll(s.layerMountPath(snap.ID, j))
 			}
 			return nil, err
 		}
@@ -605,8 +605,8 @@ func (s *snapshotter) activeMounts(snap storage.Snapshot) ([]mount.Mount, error)
 		mountPath := s.layerMountPath(snap.ID, i)
 		if err := mountErofsLayer(layerPath, mountPath); err != nil {
 			// Cleanup already mounted layers on error
-			for j := 0; j < i; j++ {
-				unmountAll(s.layerMountPath(snap.ID, j))
+			for j := range i {
+				_ = unmountAll(s.layerMountPath(snap.ID, j))
 			}
 			return nil, err
 		}

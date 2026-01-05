@@ -182,7 +182,7 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 		// View mounts should be directly mountable
 		if expectMulti {
 			// Multi-layer: expect single overlay mount (layers pre-mounted by snapshotter)
-			if len(lowerMounts) != 1 || lowerMounts[0].Type != "overlay" {
+			if len(lowerMounts) != 1 || lowerMounts[0].Type != testTypeOverlay {
 				t.Fatalf("expected single overlay mount for multi-layer, got: %#v", lowerMounts)
 			}
 		} else {
@@ -416,13 +416,13 @@ func TestErofsBlockModeMountsAfterPrepare(t *testing.T) {
 	env := newSnapshotTestEnv(t, WithDefaultSize(16*1024*1024))
 
 	key := "block-active"
-	if _, err := env.snapshotter.Prepare(env.ctx, key, ""); err != nil {
+	if _, err := env.snapshotter.Prepare(env.ctx(), key, ""); err != nil {
 		t.Fatal(err)
 	}
 
 	// Block mode now returns direct mounts (no templates).
 	// The ext4 layer is mounted internally and a bind mount is returned.
-	mounts1, err := env.snapshotter.Mounts(env.ctx, key)
+	mounts1, err := env.snapshotter.Mounts(env.ctx(), key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +445,7 @@ func TestErofsBlockModeMountsAfterPrepare(t *testing.T) {
 	}
 
 	// Subsequent calls return consistent mounts (idempotent).
-	mounts2, err := env.snapshotter.Mounts(env.ctx, key)
+	mounts2, err := env.snapshotter.Mounts(env.ctx(), key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -453,7 +453,7 @@ func TestErofsBlockModeMountsAfterPrepare(t *testing.T) {
 		t.Fatalf("expected consistent mounts, got %d vs %d", len(mounts1), len(mounts2))
 	}
 
-	if err := env.snapshotter.Remove(env.ctx, key); err != nil {
+	if err := env.snapshotter.Remove(env.ctx(), key); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -471,7 +471,7 @@ func TestErofsCleanupRemovesOrphan(t *testing.T) {
 	}
 
 	// Call Cleanup directly - *snapshotter implements Cleanup
-	if err := env.snapshotter.Cleanup(env.ctx); err != nil {
+	if err := env.snapshotter.Cleanup(env.ctx()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -511,7 +511,7 @@ func TestErofsViewMountsMultiLayer(t *testing.T) {
 	}
 
 	// Should be overlay type with lowerdir pointing to mounted layers
-	if viewMounts[0].Type != "overlay" {
+	if viewMounts[0].Type != testTypeOverlay {
 		t.Fatalf("expected overlay type, got: %s", viewMounts[0].Type)
 	}
 
@@ -531,7 +531,7 @@ func TestErofsViewMountsMultiLayer(t *testing.T) {
 	}
 
 	// Layer directories should exist (mounted by snapshotter)
-	viewID := snapshotID(env.ctx, t, env.snapshotter, viewKey)
+	viewID := snapshotID(env.ctx(), t, env.snapshotter, viewKey)
 	layersDir := filepath.Join(env.snapshotter.root, "snapshots", viewID, "layers")
 	entries, err := os.ReadDir(layersDir)
 	if err != nil {
@@ -595,7 +595,7 @@ func TestErofsViewMountsCleanupOnRemove(t *testing.T) {
 	if len(viewMounts) != 1 {
 		t.Fatalf("expected 1 overlay mount, got %d: %+v", len(viewMounts), viewMounts)
 	}
-	if viewMounts[0].Type != "overlay" {
+	if viewMounts[0].Type != testTypeOverlay {
 		t.Fatalf("expected overlay mount type, got: %s", viewMounts[0].Type)
 	}
 	// Should have lowerdir with actual paths (not templates)
@@ -614,7 +614,7 @@ func TestErofsViewMountsCleanupOnRemove(t *testing.T) {
 	}
 
 	// Get snapshot directory path
-	viewID := snapshotID(env.ctx, t, env.snapshotter, viewKey)
+	viewID := snapshotID(env.ctx(), t, env.snapshotter, viewKey)
 	snapshotDir := filepath.Join(env.snapshotter.root, "snapshots", viewID)
 
 	// Snapshot directory should exist
@@ -623,7 +623,7 @@ func TestErofsViewMountsCleanupOnRemove(t *testing.T) {
 	}
 
 	// Remove the view snapshot
-	if err := env.snapshotter.Remove(env.ctx, viewKey); err != nil {
+	if err := env.snapshotter.Remove(env.ctx(), viewKey); err != nil {
 		t.Fatalf("failed to remove view snapshot: %v", err)
 	}
 
@@ -655,7 +655,7 @@ func TestErofsViewMountsIdempotent(t *testing.T) {
 	mounts1 := env.createView(viewKey, parentKey)
 
 	// Call Mounts() again on the same view
-	mounts2, err := env.snapshotter.Mounts(env.ctx, viewKey)
+	mounts2, err := env.snapshotter.Mounts(env.ctx(), viewKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -721,7 +721,7 @@ func TestErofsBlockModeIgnoresFsMerge(t *testing.T) {
 	}
 
 	// Should be overlay type with actual paths
-	if viewMounts[0].Type != "overlay" {
+	if viewMounts[0].Type != testTypeOverlay {
 		t.Fatalf("expected overlay mount type, got %s", viewMounts[0].Type)
 	}
 
@@ -754,7 +754,7 @@ func TestErofsExtractSnapshotWithParents(t *testing.T) {
 
 	// Create extract snapshot with 2 parents - use Prepare directly since extract
 	// snapshots return a bind mount to fs/, not an overlay with upper directory
-	extractMounts, err := env.snapshotter.Prepare(env.ctx, "extract-with-parents", layer2Commit)
+	extractMounts, err := env.snapshotter.Prepare(env.ctx(), "extract-with-parents", layer2Commit)
 	if err != nil {
 		t.Fatalf("failed to prepare extract snapshot: %v", err)
 	}
@@ -797,14 +797,14 @@ func TestErofsImmutableFlagOnCommit(t *testing.T) {
 	env.createLayerWithLabels("layer1-active", "", "test.txt", "content", labels)
 
 	// Get the committed snapshot info
-	info, err := env.snapshotter.Stat(env.ctx, "layer1-active-commit")
+	info, err := env.snapshotter.Stat(env.ctx(), "layer1-active-commit")
 	if err != nil {
 		t.Fatalf("failed to stat committed snapshot: %v", err)
 	}
 	t.Logf("committed snapshot info: %+v", info)
 
 	// Verify the layer blob has immutable flag
-	layerBlob := env.snapshotter.layerBlobPath(snapshotID(env.ctx, t, env.snapshotter, "layer1-active-commit"))
+	layerBlob := env.snapshotter.layerBlobPath(snapshotID(env.ctx(), t, env.snapshotter, "layer1-active-commit"))
 	if _, err := os.Stat(layerBlob); err != nil {
 		t.Fatalf("layer blob not found at %s: %v", layerBlob, err)
 	}
@@ -835,10 +835,10 @@ func TestErofsImmutableFlagClearedOnRemove(t *testing.T) {
 	commitKey := env.createLayerWithLabels("layer1-active", "", "test.txt", "content", labels)
 
 	// Get the layer blob path before removal
-	layerBlob := env.snapshotter.layerBlobPath(snapshotID(env.ctx, t, env.snapshotter, commitKey))
+	layerBlob := env.snapshotter.layerBlobPath(snapshotID(env.ctx(), t, env.snapshotter, commitKey))
 
 	// Remove the snapshot - this should clear the immutable flag first
-	if err := env.snapshotter.Remove(env.ctx, commitKey); err != nil {
+	if err := env.snapshotter.Remove(env.ctx(), commitKey); err != nil {
 		t.Fatalf("failed to remove snapshot: %v", err)
 	}
 
@@ -848,7 +848,7 @@ func TestErofsImmutableFlagClearedOnRemove(t *testing.T) {
 	}
 
 	// Verify snapshot is gone
-	_, err := env.snapshotter.Stat(env.ctx, commitKey)
+	_, err := env.snapshotter.Stat(env.ctx(), commitKey)
 	if err == nil {
 		t.Error("expected snapshot to be removed")
 	}
@@ -873,7 +873,7 @@ func TestErofsConcurrentMounts(t *testing.T) {
 
 	for i := range numGoroutines {
 		go func(id int) {
-			mounts, err := env.snapshotter.Mounts(env.ctx, "concurrent-view")
+			mounts, err := env.snapshotter.Mounts(env.ctx(), "concurrent-view")
 			if err != nil {
 				errors <- fmt.Errorf("goroutine %d: %w", id, err)
 				return
