@@ -37,6 +37,7 @@ import (
 	"google.golang.org/grpc/grpclog"
 
 	differ "github.com/aledbf/nexuserofs/internal/differ"
+	"github.com/aledbf/nexuserofs/internal/preflight"
 	snapshotter "github.com/aledbf/nexuserofs/internal/snapshotter"
 	"github.com/aledbf/nexuserofs/internal/store"
 )
@@ -48,6 +49,12 @@ const (
 )
 
 func main() {
+	// Run preflight checks early to fail fast
+	if err := preflight.Check(); err != nil {
+		fmt.Fprintf(os.Stderr, "preflight check failed: %v\n", err)
+		os.Exit(1)
+	}
+
 	app := &cli.App{
 		Name:  "nexuserofs-snapshotter",
 		Usage: "External EROFS snapshotter for containerd",
