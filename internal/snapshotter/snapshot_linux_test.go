@@ -50,7 +50,6 @@ import (
 	"github.com/containerd/containerd/v2/core/images/imagetest"
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/mount/manager"
-	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/snapshots/storage"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/testutil"
@@ -414,28 +413,16 @@ func TestErofsSnapshotterFsmetaSingleLayerView(t *testing.T) {
 }
 
 func TestErofsBlockModeMountsAfterPrepare(t *testing.T) {
-	testutil.RequiresRoot(t)
-	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
-
-	if _, err := exec.LookPath("mkfs.ext4"); err != nil {
-		t.Skipf("could not find mkfs.ext4: %v", err)
-	}
-
-	sn := newSnapshotter(t, WithDefaultSize(16*1024*1024))
-	snapshtr, cleanup, err := sn(ctx, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cleanup()
+	env := newSnapshotTestEnv(t, WithDefaultSize(16*1024*1024))
 
 	key := "block-active"
-	if _, err := snapshtr.Prepare(ctx, key, ""); err != nil {
+	if _, err := env.snapshotter.Prepare(env.ctx, key, ""); err != nil {
 		t.Fatal(err)
 	}
 
 	// Block mode now returns direct mounts (no templates).
 	// The ext4 layer is mounted internally and a bind mount is returned.
-	mounts1, err := snapshtr.Mounts(ctx, key)
+	mounts1, err := env.snapshotter.Mounts(env.ctx, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -458,7 +445,7 @@ func TestErofsBlockModeMountsAfterPrepare(t *testing.T) {
 	}
 
 	// Subsequent calls return consistent mounts (idempotent).
-	mounts2, err := snapshtr.Mounts(ctx, key)
+	mounts2, err := env.snapshotter.Mounts(env.ctx, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,51 +453,29 @@ func TestErofsBlockModeMountsAfterPrepare(t *testing.T) {
 		t.Fatalf("expected consistent mounts, got %d vs %d", len(mounts1), len(mounts2))
 	}
 
-	if err := snapshtr.Remove(ctx, key); err != nil {
+	if err := env.snapshotter.Remove(env.ctx, key); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestErofsCleanupRemovesOrphan(t *testing.T) {
-	testutil.RequiresRoot(t)
-	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
-
-	sn := newSnapshotter(t)
-	snapshtr, cleanup, err := sn(ctx, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cleanup()
-
-	cleaner, ok := snapshtr.(snapshots.Cleaner)
-	if !ok {
-		t.Fatal("snapshotter does not implement Cleanup")
-	}
+	env := newSnapshotTestEnv(t)
 
 	// Create and commit a snapshot to initialize the metadata store bucket.
-	_, err = snapshtr.Prepare(ctx, "init", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := snapshtr.Commit(ctx, "committed", "init"); err != nil {
-		t.Fatal(err)
-	}
+	env.createLayer("init", "", "test.txt", "content")
 
 	// Create an orphan snapshot directory not tracked by metadata.
-	snap, ok := snapshtr.(*snapshotter)
-	if !ok {
-		t.Fatal("failed to cast snapshotter to *snapshotter")
-	}
-	orphanDir := filepath.Join(snap.root, "snapshots", "orphan")
+	orphanDir := filepath.Join(env.snapshotter.root, "snapshots", "orphan")
 	if err := os.MkdirAll(filepath.Join(orphanDir, "fs"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := cleaner.Cleanup(ctx); err != nil {
+	// Call Cleanup directly - *snapshotter implements Cleanup
+	if err := env.snapshotter.Cleanup(env.ctx); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = os.Stat(orphanDir)
+	_, err := os.Stat(orphanDir)
 	if err == nil {
 		t.Fatalf("expected orphan dir to be removed: %s", orphanDir)
 	}
@@ -523,50 +488,20 @@ func TestErofsCleanupRemovesOrphan(t *testing.T) {
 // return EROFS mount descriptors with device= options for additional layers.
 // These descriptors are transformed by consumers into virtio-blk disks.
 func TestErofsViewMountsMultiLayer(t *testing.T) {
-	testutil.RequiresRoot(t)
-	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
-
-	sn := newSnapshotter(t)
-	snapshtr, cleanup, err := sn(ctx, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cleanup()
-	defer cleanupAllSnapshots(ctx, snapshtr)
-
-	snap, ok := snapshtr.(*snapshotter)
-	if !ok {
-		t.Fatal("failed to cast snapshotter to *snapshotter")
-	}
+	env := newSnapshotTestEnv(t)
 
 	// Create 3 layers (multiple parents)
 	var parentKey string
 	for i := range 3 {
 		key := fmt.Sprintf("layer-%d", i)
-		commitKey := fmt.Sprintf("layer-%d-commit", i)
-
-		if _, err := snapshtr.Prepare(ctx, key, parentKey); err != nil {
-			t.Fatalf("failed to prepare layer %d: %v", i, err)
-		}
-
-		id := snapshotID(ctx, t, snap, key)
 		filename := fmt.Sprintf("file-%d.txt", i)
-		if err := os.WriteFile(filepath.Join(snap.blockUpperPath(id), filename), []byte(fmt.Sprintf("content-%d", i)), 0644); err != nil {
-			t.Fatalf("failed to write file in layer %d: %v", i, err)
-		}
-
-		if err := snapshtr.Commit(ctx, commitKey, key); err != nil {
-			t.Fatalf("failed to commit layer %d: %v", i, err)
-		}
-		parentKey = commitKey
+		content := fmt.Sprintf("content-%d", i)
+		parentKey = env.createLayer(key, parentKey, filename, content)
 	}
 
 	// Create a View of the multi-layer snapshot
 	viewKey := "multi-layer-view"
-	viewMounts, err := snapshtr.View(ctx, viewKey, parentKey)
-	if err != nil {
-		t.Fatal(err)
-	}
+	viewMounts := env.createView(viewKey, parentKey)
 
 	t.Logf("view mounts: %#v", viewMounts)
 
@@ -596,8 +531,8 @@ func TestErofsViewMountsMultiLayer(t *testing.T) {
 	}
 
 	// Layer directories should exist (mounted by snapshotter)
-	viewID := snapshotID(ctx, t, snap, viewKey)
-	layersDir := filepath.Join(snap.root, "snapshots", viewID, "layers")
+	viewID := snapshotID(env.ctx, t, env.snapshotter, viewKey)
+	layersDir := filepath.Join(env.snapshotter.root, "snapshots", viewID, "layers")
 	entries, err := os.ReadDir(layersDir)
 	if err != nil {
 		t.Fatalf("expected layers directory to exist: %v", err)
@@ -610,45 +545,14 @@ func TestErofsViewMountsMultiLayer(t *testing.T) {
 // TestErofsViewMountsSingleLayer tests that View snapshots with a single layer
 // return an EROFS mount directly (no overlay needed).
 func TestErofsViewMountsSingleLayer(t *testing.T) {
-	testutil.RequiresRoot(t)
-	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
-
-	sn := newSnapshotter(t)
-	snapshtr, cleanup, err := sn(ctx, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cleanup()
-	defer cleanupAllSnapshots(ctx, snapshtr)
-
-	snap, ok := snapshtr.(*snapshotter)
-	if !ok {
-		t.Fatal("failed to cast snapshotter to *snapshotter")
-	}
+	env := newSnapshotTestEnv(t)
 
 	// Create a single layer
-	key := "single-layer"
-	commitKey := "single-layer-commit"
-
-	if _, err := snapshtr.Prepare(ctx, key, ""); err != nil {
-		t.Fatal(err)
-	}
-
-	id := snapshotID(ctx, t, snap, key)
-	if err := os.WriteFile(filepath.Join(snap.blockUpperPath(id), "test.txt"), []byte("test"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := snapshtr.Commit(ctx, commitKey, key); err != nil {
-		t.Fatal(err)
-	}
+	commitKey := env.createLayer("single-layer", "", "test.txt", "test")
 
 	// Create a View of the single-layer snapshot
 	viewKey := "single-layer-view"
-	viewMounts, err := snapshtr.View(ctx, viewKey, commitKey)
-	if err != nil {
-		t.Fatal(err)
-	}
+	viewMounts := env.createView(viewKey, commitKey)
 
 	t.Logf("single layer view mounts: %#v", viewMounts)
 
@@ -671,49 +575,19 @@ func TestErofsViewMountsSingleLayer(t *testing.T) {
 // cleaned up when the snapshot is removed. Since no host mounting is done, cleanup
 // simply removes the snapshot directory.
 func TestErofsViewMountsCleanupOnRemove(t *testing.T) {
-	testutil.RequiresRoot(t)
-	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
-
-	sn := newSnapshotter(t)
-	snapshtr, cleanup, err := sn(ctx, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cleanup()
-	defer cleanupAllSnapshots(ctx, snapshtr)
-
-	snap, ok := snapshtr.(*snapshotter)
-	if !ok {
-		t.Fatal("failed to cast snapshotter to *snapshotter")
-	}
+	env := newSnapshotTestEnv(t)
 
 	// Create 2 layers
 	var parentKey string
 	for i := range 2 {
 		key := fmt.Sprintf("layer-%d", i)
-		commitKey := fmt.Sprintf("layer-%d-commit", i)
-
-		if _, err := snapshtr.Prepare(ctx, key, parentKey); err != nil {
-			t.Fatal(err)
-		}
-
-		id := snapshotID(ctx, t, snap, key)
-		if err := os.WriteFile(filepath.Join(snap.blockUpperPath(id), fmt.Sprintf("file-%d.txt", i)), []byte("content"), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		if err := snapshtr.Commit(ctx, commitKey, key); err != nil {
-			t.Fatal(err)
-		}
-		parentKey = commitKey
+		filename := fmt.Sprintf("file-%d.txt", i)
+		parentKey = env.createLayer(key, parentKey, filename, "content")
 	}
 
 	// Create a View (returns EROFS descriptors, no host mounting)
 	viewKey := "cleanup-test-view"
-	viewMounts, err := snapshtr.View(ctx, viewKey, parentKey)
-	if err != nil {
-		t.Fatal(err)
-	}
+	viewMounts := env.createView(viewKey, parentKey)
 
 	t.Logf("view mounts: %#v", viewMounts)
 
@@ -740,8 +614,8 @@ func TestErofsViewMountsCleanupOnRemove(t *testing.T) {
 	}
 
 	// Get snapshot directory path
-	viewID := snapshotID(ctx, t, snap, viewKey)
-	snapshotDir := filepath.Join(snap.root, "snapshots", viewID)
+	viewID := snapshotID(env.ctx, t, env.snapshotter, viewKey)
+	snapshotDir := filepath.Join(env.snapshotter.root, "snapshots", viewID)
 
 	// Snapshot directory should exist
 	if _, err := os.Stat(snapshotDir); err != nil {
@@ -749,12 +623,12 @@ func TestErofsViewMountsCleanupOnRemove(t *testing.T) {
 	}
 
 	// Remove the view snapshot
-	if err := snapshtr.Remove(ctx, viewKey); err != nil {
+	if err := env.snapshotter.Remove(env.ctx, viewKey); err != nil {
 		t.Fatalf("failed to remove view snapshot: %v", err)
 	}
 
 	// After removal, the snapshot directory should not exist
-	_, err = os.Stat(snapshotDir)
+	_, err := os.Stat(snapshotDir)
 	if err == nil {
 		t.Fatalf("expected snapshot directory to be removed: %s", snapshotDir)
 	}
@@ -766,52 +640,22 @@ func TestErofsViewMountsCleanupOnRemove(t *testing.T) {
 // TestErofsViewMountsIdempotent tests that calling Mounts() multiple times
 // on a View snapshot returns consistent EROFS descriptors.
 func TestErofsViewMountsIdempotent(t *testing.T) {
-	testutil.RequiresRoot(t)
-	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
-
-	sn := newSnapshotter(t)
-	snapshtr, cleanup, err := sn(ctx, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cleanup()
-	defer cleanupAllSnapshots(ctx, snapshtr)
-
-	snap, ok := snapshtr.(*snapshotter)
-	if !ok {
-		t.Fatal("failed to cast snapshotter to *snapshotter")
-	}
+	env := newSnapshotTestEnv(t)
 
 	// Create 2 layers
 	var parentKey string
 	for i := range 2 {
 		key := fmt.Sprintf("layer-%d", i)
-		commitKey := fmt.Sprintf("layer-%d-commit", i)
-
-		if _, err := snapshtr.Prepare(ctx, key, parentKey); err != nil {
-			t.Fatal(err)
-		}
-
-		id := snapshotID(ctx, t, snap, key)
-		if err := os.WriteFile(filepath.Join(snap.blockUpperPath(id), fmt.Sprintf("file-%d.txt", i)), []byte("content"), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		if err := snapshtr.Commit(ctx, commitKey, key); err != nil {
-			t.Fatal(err)
-		}
-		parentKey = commitKey
+		filename := fmt.Sprintf("file-%d.txt", i)
+		parentKey = env.createLayer(key, parentKey, filename, "content")
 	}
 
 	// Create a View
 	viewKey := "idempotent-test-view"
-	mounts1, err := snapshtr.View(ctx, viewKey, parentKey)
-	if err != nil {
-		t.Fatal(err)
-	}
+	mounts1 := env.createView(viewKey, parentKey)
 
 	// Call Mounts() again on the same view
-	mounts2, err := snapshtr.Mounts(ctx, viewKey)
+	mounts2, err := env.snapshotter.Mounts(env.ctx, viewKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -848,86 +692,18 @@ func TestErofsViewMountsIdempotent(t *testing.T) {
 // mounts layers individually because fsMeta merge is not supported with
 // block-based writable layers.
 func TestErofsBlockModeIgnoresFsMerge(t *testing.T) {
-	testutil.RequiresRoot(t)
-	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
+	env := newSnapshotTestEnv(t, WithDefaultSize(64*1024*1024), WithFsMergeThreshold(5))
 
-	_, err := exec.LookPath("mkfs.erofs")
-	if err != nil {
-		t.Skipf("could not find mkfs.erofs: %v", err)
-	}
-	if err := preflight.CheckErofsSupport(); err != nil {
-		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
-	}
+	// Create first layer with extract label
+	labels := map[string]string{extractLabel: "true"}
+	layer1Commit := env.createLayerWithLabels("layer1-active", "", "file1.txt", "layer1", labels)
 
-	tempDir := t.TempDir()
-	snapshotRoot := filepath.Join(tempDir, "snapshots")
-
-	// Create snapshotter with fsMergeThreshold configured
-	// Block mode ignores fsMerge (mounts layers individually)
-	s, err := NewSnapshotter(snapshotRoot,
-		WithDefaultSize(64*1024*1024),
-		WithFsMergeThreshold(5),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	defer cleanupAllSnapshots(ctx, s)
-
-	// Create first layer
-	layer1, err := s.Prepare(ctx, "layer1-active", "", snapshots.WithLabels(map[string]string{
-		extractLabel: "true",
-	}))
-	if err != nil {
-		t.Fatalf("failed to prepare layer1: %v", err)
-	}
-
-	// Create content
-	mounts, err := s.Mounts(ctx, "layer1-active")
-	if err != nil {
-		t.Fatalf("failed to get mounts: %v", err)
-	}
-	if err := mount.WithTempMount(ctx, mounts, func(root string) error {
-		return os.WriteFile(filepath.Join(root, "file1.txt"), []byte("layer1"), 0644)
-	}); err != nil {
-		t.Fatalf("failed to write to layer1: %v", err)
-	}
-
-	// Commit first layer
-	if err := s.Commit(ctx, "layer1", "layer1-active"); err != nil {
-		t.Fatalf("failed to commit layer1: %v", err)
-	}
-
-	// Create second layer on top
-	layer2, err := s.Prepare(ctx, "layer2-active", "layer1", snapshots.WithLabels(map[string]string{
-		extractLabel: "true",
-	}))
-	if err != nil {
-		t.Fatalf("failed to prepare layer2: %v", err)
-	}
-
-	mounts, err = s.Mounts(ctx, "layer2-active")
-	if err != nil {
-		t.Fatalf("failed to get mounts: %v", err)
-	}
-	if err := mount.WithTempMount(ctx, mounts, func(root string) error {
-		return os.WriteFile(filepath.Join(root, "file2.txt"), []byte("layer2"), 0644)
-	}); err != nil {
-		t.Fatalf("failed to write to layer2: %v", err)
-	}
-
-	if err := s.Commit(ctx, "layer2", "layer2-active"); err != nil {
-		t.Fatalf("failed to commit layer2: %v", err)
-	}
+	// Create second layer on top with extract label
+	layer2Commit := env.createLayerWithLabels("layer2-active", layer1Commit, "file2.txt", "layer2", labels)
 
 	// Create a View with 2 parents - this would trigger fsMerge in directory mode
-	viewMounts, err := s.View(ctx, "view-test", "layer2")
-	if err != nil {
-		t.Fatalf("failed to get view mounts: %v", err)
-	}
+	viewMounts := env.createView("view-test", layer2Commit)
 
-	t.Logf("layer1 info: %+v", layer1)
-	t.Logf("layer2 info: %+v", layer2)
 	t.Logf("view mounts: %+v", viewMounts)
 
 	// Verify no fsmeta was used (would have device= options)
@@ -969,82 +745,18 @@ func TestErofsBlockModeIgnoresFsMerge(t *testing.T) {
 // TestErofsExtractSnapshotWithParents verifies that extract snapshots
 // always return a bind mount to the fs/ directory, regardless of parent count.
 func TestErofsExtractSnapshotWithParents(t *testing.T) {
-	testutil.RequiresRoot(t)
-	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
+	env := newSnapshotTestEnv(t)
 
-	_, err := exec.LookPath("mkfs.erofs")
-	if err != nil {
-		t.Skipf("could not find mkfs.erofs: %v", err)
-	}
-	if err := preflight.CheckErofsSupport(); err != nil {
-		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
-	}
+	// Create and commit layers with extract label
+	labels := map[string]string{extractLabel: "true"}
+	layer1Commit := env.createLayerWithLabels("layer1-active", "", "file1.txt", "layer1", labels)
+	layer2Commit := env.createLayerWithLabels("layer2-active", layer1Commit, "file2.txt", "layer2", labels)
 
-	tempDir := t.TempDir()
-	snapshotRoot := filepath.Join(tempDir, "snapshots")
-
-	s, err := NewSnapshotter(snapshotRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	defer cleanupAllSnapshots(ctx, s)
-
-	// Create and commit first layer
-	_, err = s.Prepare(ctx, "layer1-active", "", snapshots.WithLabels(map[string]string{
-		extractLabel: "true",
-	}))
-	if err != nil {
-		t.Fatalf("failed to prepare layer1: %v", err)
-	}
-
-	mounts, err := s.Mounts(ctx, "layer1-active")
-	if err != nil {
-		t.Fatalf("failed to get mounts: %v", err)
-	}
-	if err := mount.WithTempMount(ctx, mounts, func(root string) error {
-		return os.WriteFile(filepath.Join(root, "file1.txt"), []byte("layer1"), 0644)
-	}); err != nil {
-		t.Fatalf("failed to write to layer1: %v", err)
-	}
-
-	if err := s.Commit(ctx, "layer1", "layer1-active"); err != nil {
-		t.Fatalf("failed to commit layer1: %v", err)
-	}
-
-	// Create and commit second layer
-	_, err = s.Prepare(ctx, "layer2-active", "layer1", snapshots.WithLabels(map[string]string{
-		extractLabel: "true",
-	}))
-	if err != nil {
-		t.Fatalf("failed to prepare layer2: %v", err)
-	}
-
-	mounts, err = s.Mounts(ctx, "layer2-active")
-	if err != nil {
-		t.Fatalf("failed to get mounts: %v", err)
-	}
-	if err := mount.WithTempMount(ctx, mounts, func(root string) error {
-		return os.WriteFile(filepath.Join(root, "file2.txt"), []byte("layer2"), 0644)
-	}); err != nil {
-		t.Fatalf("failed to write to layer2: %v", err)
-	}
-
-	if err := s.Commit(ctx, "layer2", "layer2-active"); err != nil {
-		t.Fatalf("failed to commit layer2: %v", err)
-	}
-
-	// Create extract snapshot with 2 parents
-	_, err = s.Prepare(ctx, "extract-with-parents", "layer2", snapshots.WithLabels(map[string]string{
-		extractLabel: "true",
-	}))
+	// Create extract snapshot with 2 parents - use Prepare directly since extract
+	// snapshots return a bind mount to fs/, not an overlay with upper directory
+	extractMounts, err := env.snapshotter.Prepare(env.ctx, "extract-with-parents", layer2Commit)
 	if err != nil {
 		t.Fatalf("failed to prepare extract snapshot: %v", err)
-	}
-
-	extractMounts, err := s.Mounts(ctx, "extract-with-parents")
-	if err != nil {
-		t.Fatalf("failed to get extract mounts: %v", err)
 	}
 
 	t.Logf("extract mounts: %+v", extractMounts)
@@ -1078,64 +790,21 @@ func TestErofsExtractSnapshotWithParents(t *testing.T) {
 // TestErofsImmutableFlagOnCommit verifies that the immutable flag (FS_IMMUTABLE_FL)
 // is set on the EROFS layer blob when WithImmutable option is enabled.
 func TestErofsImmutableFlagOnCommit(t *testing.T) {
-	testutil.RequiresRoot(t)
-	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
+	env := newSnapshotTestEnv(t, WithImmutable())
 
-	_, err := exec.LookPath("mkfs.erofs")
-	if err != nil {
-		t.Skipf("could not find mkfs.erofs: %v", err)
-	}
-	if err := preflight.CheckErofsSupport(); err != nil {
-		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
-	}
-
-	tempDir := t.TempDir()
-	snapshotRoot := filepath.Join(tempDir, "snapshots")
-
-	// Create snapshotter with immutable flag enabled
-	s, err := NewSnapshotter(snapshotRoot, WithImmutable())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	defer cleanupAllSnapshots(ctx, s)
-
-	snap, ok := s.(*snapshotter)
-	if !ok {
-		t.Fatal("failed to cast snapshotter to *snapshotter")
-	}
-
-	// Create and commit a layer
-	_, err = s.Prepare(ctx, "layer1-active", "", snapshots.WithLabels(map[string]string{
-		extractLabel: "true",
-	}))
-	if err != nil {
-		t.Fatalf("failed to prepare layer1: %v", err)
-	}
-
-	mounts, err := s.Mounts(ctx, "layer1-active")
-	if err != nil {
-		t.Fatalf("failed to get mounts: %v", err)
-	}
-	if err := mount.WithTempMount(ctx, mounts, func(root string) error {
-		return os.WriteFile(filepath.Join(root, "test.txt"), []byte("content"), 0644)
-	}); err != nil {
-		t.Fatalf("failed to write content: %v", err)
-	}
-
-	if err := s.Commit(ctx, "layer1", "layer1-active"); err != nil {
-		t.Fatalf("failed to commit: %v", err)
-	}
+	// Create and commit a layer with extract label
+	labels := map[string]string{extractLabel: "true"}
+	env.createLayerWithLabels("layer1-active", "", "test.txt", "content", labels)
 
 	// Get the committed snapshot info
-	info, err := s.Stat(ctx, "layer1")
+	info, err := env.snapshotter.Stat(env.ctx, "layer1-active-commit")
 	if err != nil {
 		t.Fatalf("failed to stat committed snapshot: %v", err)
 	}
 	t.Logf("committed snapshot info: %+v", info)
 
 	// Verify the layer blob has immutable flag
-	layerBlob := snap.layerBlobPath(snapshotID(ctx, t, snap, "layer1"))
+	layerBlob := env.snapshotter.layerBlobPath(snapshotID(env.ctx, t, env.snapshotter, "layer1-active-commit"))
 	if _, err := os.Stat(layerBlob); err != nil {
 		t.Fatalf("layer blob not found at %s: %v", layerBlob, err)
 	}
@@ -1159,59 +828,17 @@ func TestErofsImmutableFlagOnCommit(t *testing.T) {
 // TestErofsImmutableFlagClearedOnRemove verifies that the immutable flag
 // is cleared before removing a committed snapshot, allowing deletion.
 func TestErofsImmutableFlagClearedOnRemove(t *testing.T) {
-	testutil.RequiresRoot(t)
-	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
+	env := newSnapshotTestEnv(t, WithImmutable())
 
-	_, err := exec.LookPath("mkfs.erofs")
-	if err != nil {
-		t.Skipf("could not find mkfs.erofs: %v", err)
-	}
-	if err := preflight.CheckErofsSupport(); err != nil {
-		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
-	}
-
-	tempDir := t.TempDir()
-	snapshotRoot := filepath.Join(tempDir, "snapshots")
-
-	// Create snapshotter with immutable flag enabled
-	s, err := NewSnapshotter(snapshotRoot, WithImmutable())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-
-	snap, ok := s.(*snapshotter)
-	if !ok {
-		t.Fatal("failed to cast snapshotter to *snapshotter")
-	}
-
-	// Create and commit a layer
-	_, err = s.Prepare(ctx, "layer1-active", "", snapshots.WithLabels(map[string]string{
-		extractLabel: "true",
-	}))
-	if err != nil {
-		t.Fatalf("failed to prepare: %v", err)
-	}
-
-	mounts, err := s.Mounts(ctx, "layer1-active")
-	if err != nil {
-		t.Fatalf("failed to get mounts: %v", err)
-	}
-	if err := mount.WithTempMount(ctx, mounts, func(root string) error {
-		return os.WriteFile(filepath.Join(root, "test.txt"), []byte("content"), 0644)
-	}); err != nil {
-		t.Fatalf("failed to write content: %v", err)
-	}
-
-	if err := s.Commit(ctx, "layer1", "layer1-active"); err != nil {
-		t.Fatalf("failed to commit: %v", err)
-	}
+	// Create and commit a layer with extract label
+	labels := map[string]string{extractLabel: "true"}
+	commitKey := env.createLayerWithLabels("layer1-active", "", "test.txt", "content", labels)
 
 	// Get the layer blob path before removal
-	layerBlob := snap.layerBlobPath(snapshotID(ctx, t, snap, "layer1"))
+	layerBlob := env.snapshotter.layerBlobPath(snapshotID(env.ctx, t, env.snapshotter, commitKey))
 
 	// Remove the snapshot - this should clear the immutable flag first
-	if err := s.Remove(ctx, "layer1"); err != nil {
+	if err := env.snapshotter.Remove(env.ctx, commitKey); err != nil {
 		t.Fatalf("failed to remove snapshot: %v", err)
 	}
 
@@ -1221,7 +848,7 @@ func TestErofsImmutableFlagClearedOnRemove(t *testing.T) {
 	}
 
 	// Verify snapshot is gone
-	_, err = s.Stat(ctx, "layer1")
+	_, err := env.snapshotter.Stat(env.ctx, commitKey)
 	if err == nil {
 		t.Error("expected snapshot to be removed")
 	}
@@ -1230,53 +857,14 @@ func TestErofsImmutableFlagClearedOnRemove(t *testing.T) {
 // TestErofsConcurrentMounts verifies that concurrent mount operations
 // are safe and produce consistent results.
 func TestErofsConcurrentMounts(t *testing.T) {
-	testutil.RequiresRoot(t)
-	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
+	env := newSnapshotTestEnv(t)
 
-	_, err := exec.LookPath("mkfs.erofs")
-	if err != nil {
-		t.Skipf("could not find mkfs.erofs: %v", err)
-	}
-	if err := preflight.CheckErofsSupport(); err != nil {
-		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
-	}
-
-	tempDir := t.TempDir()
-	snapshotRoot := filepath.Join(tempDir, "snapshots")
-
-	s, err := NewSnapshotter(snapshotRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	defer cleanupAllSnapshots(ctx, s)
-
-	// Create and commit a base layer
-	_, err = s.Prepare(ctx, "base-active", "", snapshots.WithLabels(map[string]string{
-		extractLabel: "true",
-	}))
-	if err != nil {
-		t.Fatalf("failed to prepare base: %v", err)
-	}
-
-	mounts, err := s.Mounts(ctx, "base-active")
-	if err != nil {
-		t.Fatalf("failed to get mounts: %v", err)
-	}
-	if err := mount.WithTempMount(ctx, mounts, func(root string) error {
-		return os.WriteFile(filepath.Join(root, "base.txt"), []byte("base"), 0644)
-	}); err != nil {
-		t.Fatalf("failed to write content: %v", err)
-	}
-
-	if err := s.Commit(ctx, "base", "base-active"); err != nil {
-		t.Fatalf("failed to commit base: %v", err)
-	}
+	// Create and commit a base layer with extract label
+	labels := map[string]string{extractLabel: "true"}
+	baseCommit := env.createLayerWithLabels("base-active", "", "base.txt", "base", labels)
 
 	// Create a View snapshot
-	if _, err := s.View(ctx, "concurrent-view", "base"); err != nil {
-		t.Fatalf("failed to create view: %v", err)
-	}
+	env.createView("concurrent-view", baseCommit)
 
 	// Concurrent access test
 	const numGoroutines = 10
@@ -1285,7 +873,7 @@ func TestErofsConcurrentMounts(t *testing.T) {
 
 	for i := range numGoroutines {
 		go func(id int) {
-			mounts, err := s.Mounts(ctx, "concurrent-view")
+			mounts, err := env.snapshotter.Mounts(env.ctx, "concurrent-view")
 			if err != nil {
 				errors <- fmt.Errorf("goroutine %d: %w", id, err)
 				return

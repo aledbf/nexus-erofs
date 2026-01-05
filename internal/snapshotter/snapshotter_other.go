@@ -21,6 +21,7 @@ package erofs
 import (
 	"context"
 
+	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/errdefs"
 )
 
