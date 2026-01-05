@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strings"
 
 	"github.com/containerd/containerd/v2/core/content"
@@ -120,13 +119,14 @@ func (s *ErofsDiff) Compare(ctx context.Context, lower, upper []mount.Mount, opt
 		})
 	}
 
-	// For direct overlay diff, resolve the layer path from mounts.
-	layer, err := erofsutils.MountsToLayer(upper)
+	// For direct overlay diff, resolve the upper content directory from mounts.
+	// This returns the actual directory containing files (e.g., layer/fs for directory
+	// mode, or layer/rw/upper for block mode).
+	upperRoot, err := erofsutils.MountsToUpperDir(upper)
 	if err != nil {
 		return ocispec.Descriptor{}, fmt.Errorf("unsupported layer for erofsDiff Compare method: %w", err)
 	}
 
-	upperRoot := filepath.Join(layer, "fs")
 	return s.writeAndCommitDiff(ctx, config, func(ctx context.Context, w io.Writer) error {
 		return writeDiff(ctx, w, lower, upperRoot, mm)
 	})

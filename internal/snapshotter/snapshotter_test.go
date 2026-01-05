@@ -258,40 +258,6 @@ func TestSnapshotterOptions(t *testing.T) {
 
 }
 
-func TestSnapshotterIsBlockMode(t *testing.T) {
-	tests := []struct {
-		name            string
-		defaultWritable int64
-		want            bool
-	}{
-		{
-			name:            "zero means directory mode",
-			defaultWritable: 0,
-			want:            false,
-		},
-		{
-			name:            "positive means block mode",
-			defaultWritable: 1024 * 1024,
-			want:            true,
-		},
-		{
-			name:            "negative treated as not block mode",
-			defaultWritable: -1,
-			want:            false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			s := &snapshotter{defaultWritable: tc.defaultWritable}
-			got := s.isBlockMode()
-			if got != tc.want {
-				t.Errorf("isBlockMode() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestSnapshotterPaths(t *testing.T) {
 	root := "/var/lib/containerd/io.containerd.snapshotter.v1.erofs"
 	s := &snapshotter{root: root}
@@ -309,14 +275,6 @@ func TestSnapshotterPaths(t *testing.T) {
 		want := filepath.Join(root, "snapshots", "123", "lower")
 		if got != want {
 			t.Errorf("viewLowerPath(123) = %q, want %q", got, want)
-		}
-	})
-
-	t.Run("workPath", func(t *testing.T) {
-		got := s.workPath("123")
-		want := filepath.Join(root, "snapshots", "123", "work")
-		if got != want {
-			t.Errorf("workPath(123) = %q, want %q", got, want)
 		}
 	})
 

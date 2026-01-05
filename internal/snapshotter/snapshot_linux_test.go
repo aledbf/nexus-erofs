@@ -859,16 +859,6 @@ func TestErofsBlockModeIgnoresFsMerge(t *testing.T) {
 	defer s.Close()
 	defer cleanupAllSnapshots(ctx, s)
 
-	snap, ok := s.(*snapshotter)
-	if !ok {
-		t.Fatal("failed to cast snapshotter to *snapshotter")
-	}
-
-	// Verify block mode is enabled
-	if !snap.isBlockMode() {
-		t.Fatal("expected block mode to be enabled")
-	}
-
 	// Create first layer
 	layer1, err := s.Prepare(ctx, "layer1-active", "", snapshots.WithLabels(map[string]string{
 		extractLabel: "true",

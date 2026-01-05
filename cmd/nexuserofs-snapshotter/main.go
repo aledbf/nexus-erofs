@@ -95,8 +95,8 @@ func main() {
 			},
 			&cli.Int64Flag{
 				Name:    "default-size",
-				Usage:   "Default writable layer size in bytes (0 = directory mode)",
-				Value:   0,
+				Usage:   "Size of ext4 writable layer in bytes (must be > 0)",
+				Value:   64 * 1024 * 1024, // 64 MiB
 				EnvVars: []string{"NEXUSEROFS_DEFAULT_SIZE"},
 			},
 			&cli.BoolFlag{
