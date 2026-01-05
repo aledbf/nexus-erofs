@@ -1108,7 +1108,7 @@ func TestErofsImmutableFlagOnCommit(t *testing.T) {
 	t.Logf("committed snapshot info: %+v", info)
 
 	// Verify the layer blob has immutable flag
-	layerBlob := snap.layerBlobPath(getSnapshotID(t, s, ctx, "layer1"))
+	layerBlob := snap.layerBlobPath(snapshotID(ctx, t, snap, "layer1"))
 	if _, err := os.Stat(layerBlob); err != nil {
 		t.Fatalf("layer blob not found at %s: %v", layerBlob, err)
 	}
@@ -1181,7 +1181,7 @@ func TestErofsImmutableFlagClearedOnRemove(t *testing.T) {
 	}
 
 	// Get the layer blob path before removal
-	layerBlob := snap.layerBlobPath(getSnapshotID(t, s, ctx, "layer1"))
+	layerBlob := snap.layerBlobPath(snapshotID(ctx, t, snap, "layer1"))
 
 	// Remove the snapshot - this should clear the immutable flag first
 	if err := s.Remove(ctx, "layer1"); err != nil {
@@ -1198,32 +1198,6 @@ func TestErofsImmutableFlagClearedOnRemove(t *testing.T) {
 	if err == nil {
 		t.Error("expected snapshot to be removed")
 	}
-}
-
-// getSnapshotID retrieves the internal ID for a snapshot name
-func getSnapshotID(t *testing.T, s snapshots.Snapshotter, ctx context.Context, name string) string {
-	t.Helper()
-
-	// Get from metastore directly via the snapshotter
-	snap, ok := s.(*snapshotter)
-	if !ok {
-		t.Fatal("failed to cast to snapshotter")
-	}
-
-	var id string
-	err := snap.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
-		snapshotID, _, _, err := storage.GetInfo(ctx, name)
-		if err != nil {
-			return err
-		}
-		id = snapshotID
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("failed to get snapshot ID: %v", err)
-	}
-
-	return id
 }
 
 // TestErofsConcurrentMounts verifies that concurrent mount operations
