@@ -534,14 +534,15 @@ func (s *snapshotter) viewMounts(snap storage.Snapshot) ([]mount.Mount, error) {
 	}
 
 	// Multi-layer: mount each layer and return overlay
-	// Layers are ordered from bottom (oldest) to top (newest).
+	// ParentIDs are ordered from newest (immediate parent) to oldest (root).
+	// For overlayfs, lowerdir must be ordered top-to-bottom (newest first).
 	var lowerdirs []string
-	for i := len(layerPaths) - 1; i >= 0; i-- {
-		mountPath := s.layerMountPath(snap.ID, len(layerPaths)-1-i)
-		if err := mountErofsLayer(layerPaths[i], mountPath); err != nil {
+	for i, layerPath := range layerPaths {
+		mountPath := s.layerMountPath(snap.ID, i)
+		if err := mountErofsLayer(layerPath, mountPath); err != nil {
 			// Cleanup already mounted layers on error
-			for j := len(layerPaths) - 1; j > i; j-- {
-				unmountAll(s.layerMountPath(snap.ID, len(layerPaths)-1-j))
+			for j := 0; j < i; j++ {
+				unmountAll(s.layerMountPath(snap.ID, j))
 			}
 			return nil, err
 		}
@@ -582,13 +583,15 @@ func (s *snapshotter) activeMounts(snap storage.Snapshot) ([]mount.Mount, error)
 	}
 
 	// Mount each layer and collect mount paths
+	// ParentIDs are ordered from newest (immediate parent) to oldest (root).
+	// For overlayfs, lowerdir must be ordered top-to-bottom (newest first).
 	var lowerdirs []string
-	for i := len(layerPaths) - 1; i >= 0; i-- {
-		mountPath := s.layerMountPath(snap.ID, len(layerPaths)-1-i)
-		if err := mountErofsLayer(layerPaths[i], mountPath); err != nil {
+	for i, layerPath := range layerPaths {
+		mountPath := s.layerMountPath(snap.ID, i)
+		if err := mountErofsLayer(layerPath, mountPath); err != nil {
 			// Cleanup already mounted layers on error
-			for j := len(layerPaths) - 1; j > i; j-- {
-				unmountAll(s.layerMountPath(snap.ID, len(layerPaths)-1-j))
+			for j := 0; j < i; j++ {
+				unmountAll(s.layerMountPath(snap.ID, j))
 			}
 			return nil, err
 		}
