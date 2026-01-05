@@ -1175,7 +1175,10 @@ func (s *snapshotter) Usage(ctx context.Context, key string) (_ snapshots.Usage,
 	return usage, nil
 }
 
-// Add a method to verify fsverity
+// verifyFsverity checks if fsverity is enabled on the given path.
+// TODO: integrate this into the commit flow for validation.
+//
+//nolint:unused // Will be used when fsverity validation is integrated
 func (s *snapshotter) verifyFsverity(path string) error {
 	if !s.enableFsverity {
 		return nil

@@ -30,8 +30,7 @@ func TestSetupAndDetach(t *testing.T) {
 
 	// Setup loop device
 	dev, err := Setup(backingFile, Config{
-		ReadOnly:  true,
-		Autoclear: true,
+		ReadOnly: true,
 	})
 	if err != nil {
 		t.Fatalf("Setup failed: %v", err)
@@ -62,9 +61,6 @@ func TestSetupAndDetach(t *testing.T) {
 	if info.Flags&LoFlagsReadOnly == 0 {
 		t.Error("expected read-only flag to be set")
 	}
-	if info.Flags&LoFlagsAutoclear == 0 {
-		t.Error("expected autoclear flag to be set")
-	}
 
 	// Verify backing file
 	gotBackingFile := info.BackingFile()
@@ -77,11 +73,18 @@ func TestSetupAndDetach(t *testing.T) {
 		t.Fatalf("Detach failed: %v", err)
 	}
 
-	// Verify device is detached (GetInfo should fail)
-	_, err = dev.GetInfo()
+	// Verify device is detached
+	// On some kernels, GetInfo may fail with ENXIO after detach.
+	// On others (especially newer kernels), it may succeed but return
+	// zeroed info (no backing file). Both behaviors indicate detach worked.
+	info, err = dev.GetInfo()
 	if err == nil {
-		t.Error("expected GetInfo to fail after detach")
+		// GetInfo succeeded - verify backing file is cleared
+		if bf := info.BackingFile(); bf != "" {
+			t.Errorf("expected empty backing file after detach, got: %s", bf)
+		}
 	}
+	// If GetInfo failed, that's also expected behavior - device is detached
 }
 
 func TestSetupWithOffset(t *testing.T) {
@@ -106,7 +109,6 @@ func TestSetupWithOffset(t *testing.T) {
 
 	dev, err := Setup(backingFile, Config{
 		ReadOnly:  true,
-		Autoclear: true,
 		Offset:    offset,
 		SizeLimit: sizeLimit,
 	})
@@ -146,8 +148,7 @@ func TestSetupReadWrite(t *testing.T) {
 
 	// Setup read-write loop device
 	dev, err := Setup(backingFile, Config{
-		ReadOnly:  false,
-		Autoclear: true,
+		ReadOnly: false,
 	})
 	if err != nil {
 		t.Fatalf("Setup failed: %v", err)
@@ -183,9 +184,8 @@ func TestSerial(t *testing.T) {
 	serial := "test-serial-12345"
 
 	dev, err := Setup(backingFile, Config{
-		ReadOnly:  true,
-		Autoclear: true,
-		Serial:    serial,
+		ReadOnly: true,
+		Serial:   serial,
 	})
 	if err != nil {
 		t.Fatalf("Setup failed: %v", err)
@@ -224,8 +224,7 @@ func TestFindByBackingFile(t *testing.T) {
 	f.Close()
 
 	dev, err := Setup(backingFile, Config{
-		ReadOnly:  true,
-		Autoclear: true,
+		ReadOnly: true,
 	})
 	if err != nil {
 		t.Fatalf("Setup failed: %v", err)
@@ -267,9 +266,8 @@ func TestFindBySerial(t *testing.T) {
 	serial := "find-test-serial"
 
 	dev, err := Setup(backingFile, Config{
-		ReadOnly:  true,
-		Autoclear: true,
-		Serial:    serial,
+		ReadOnly: true,
+		Serial:   serial,
 	})
 	if err != nil {
 		t.Fatalf("Setup failed: %v", err)
@@ -312,7 +310,6 @@ func TestDetachPath(t *testing.T) {
 
 	dev, err := Setup(backingFile, Config{
 		ReadOnly: true,
-		// Note: not using Autoclear to test explicit detach
 	})
 	if err != nil {
 		t.Fatalf("Setup failed: %v", err)
@@ -324,9 +321,14 @@ func TestDetachPath(t *testing.T) {
 	}
 
 	// Verify detached
-	_, err = dev.GetInfo()
+	// On some kernels, GetInfo may fail with ENXIO after detach.
+	// On others, it may succeed but return zeroed info. Both are valid.
+	info, err := dev.GetInfo()
 	if err == nil {
-		t.Error("expected GetInfo to fail after DetachPath")
+		// GetInfo succeeded - verify backing file is cleared
+		if bf := info.BackingFile(); bf != "" {
+			t.Errorf("expected empty backing file after DetachPath, got: %s", bf)
+		}
 	}
 }
 
@@ -354,7 +356,7 @@ func TestMultipleDevices(t *testing.T) {
 	}()
 
 	// Create multiple loop devices
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		backingFile := filepath.Join(tmpDir, fmt.Sprintf("backing%d.img", i))
 		f, err := os.Create(backingFile)
 		if err != nil {
@@ -367,8 +369,7 @@ func TestMultipleDevices(t *testing.T) {
 		f.Close()
 
 		dev, err := Setup(backingFile, Config{
-			ReadOnly:  true,
-			Autoclear: true,
+			ReadOnly: true,
 		})
 		if err != nil {
 			t.Fatalf("Setup %d failed: %v", i, err)

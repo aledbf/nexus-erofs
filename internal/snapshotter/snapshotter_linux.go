@@ -17,7 +17,6 @@
 package erofs
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -29,11 +28,11 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/continuity/fs"
 	"github.com/containerd/log"
-	"github.com/containerd/plugin"
 	"golang.org/x/sys/unix"
 
 	erofsutils "github.com/aledbf/nexuserofs/internal/erofs"
 	"github.com/aledbf/nexuserofs/internal/loop"
+	"github.com/aledbf/nexuserofs/internal/preflight"
 )
 
 // defaultWritableSize controls the default writable layer mode.
@@ -50,26 +49,18 @@ import (
 // See snapshotter_other.go for the non-Linux default (64 MiB block mode).
 const defaultWritableSize = 0
 
-// check if EROFS kernel filesystem is registered or not
-func findErofs() bool {
-	fs, err := os.ReadFile("/proc/filesystems")
-	if err != nil {
-		return false
-	}
-	return bytes.Contains(fs, []byte("\terofs\n"))
-}
-
 func checkCompatibility(root string) error {
+	// Check kernel version and EROFS support via preflight
+	if err := preflight.Check(); err != nil {
+		return fmt.Errorf("preflight check failed: %w", err)
+	}
+
 	supportsDType, err := fs.SupportsDType(root)
 	if err != nil {
 		return err
 	}
 	if !supportsDType {
 		return fmt.Errorf("%s does not support d_type. If the backing filesystem is xfs, please reformat with ftype=1 to enable d_type support", root)
-	}
-
-	if !findErofs() {
-		return fmt.Errorf("EROFS unsupported, please `modprobe erofs`: %w", plugin.ErrSkipPlugin)
 	}
 
 	return nil
@@ -231,9 +222,8 @@ func mountErofsWithLoop(backingFile, mountPoint, serialID string) (loopDev strin
 	}
 
 	dev, err := loop.Setup(backingFile, loop.Config{
-		ReadOnly:  true,
-		Autoclear: true,
-		Serial:    serial,
+		ReadOnly: true,
+		Serial:   serial,
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to setup loop device for %s: %w", backingFile, err)

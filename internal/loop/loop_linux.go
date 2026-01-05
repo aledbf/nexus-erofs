@@ -67,9 +67,6 @@ func Setup(backingFile string, cfg Config) (*Device, error) {
 	if cfg.ReadOnly {
 		info.Flags |= LoFlagsReadOnly
 	}
-	if cfg.Autoclear {
-		info.Flags |= LoFlagsAutoclear
-	}
 	if cfg.DirectIO {
 		info.Flags |= LoFlagsDirectIO
 	}
@@ -80,10 +77,11 @@ func Setup(backingFile string, cfg Config) (*Device, error) {
 	copy(info.FileName[:], backingFile)
 
 	// Set loop device status
+	//nolint:gosec // G103: unsafe.Pointer required for ioctl syscall with kernel struct
 	_, _, errno = unix.Syscall(unix.SYS_IOCTL, uintptr(loopFd), loopSetStatus64, uintptr(unsafe.Pointer(&info)))
 	if errno != 0 {
-		// Clean up on failure
-		unix.Syscall(unix.SYS_IOCTL, uintptr(loopFd), loopClrFd, 0)
+		// Clean up on failure (ignore error, we're already returning one)
+		_, _, _ = unix.Syscall(unix.SYS_IOCTL, uintptr(loopFd), loopClrFd, 0)
 		return nil, fmt.Errorf("LOOP_SET_STATUS64 failed for %s: %w", loopPath, errno)
 	}
 
@@ -129,6 +127,7 @@ func (d *Device) GetInfo() (*LoopInfo64, error) {
 	defer unix.Close(loopFd)
 
 	var info LoopInfo64
+	//nolint:gosec // G103: unsafe.Pointer required for ioctl syscall with kernel struct
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(loopFd), loopGetStatus64, uintptr(unsafe.Pointer(&info)))
 	if errno != 0 {
 		return nil, fmt.Errorf("LOOP_GET_STATUS64 failed for %s: %w", d.Path, errno)
@@ -222,7 +221,7 @@ func FindByBackingFile(backingFile string) (*Device, error) {
 
 		if sysfsBackingFile == absPath || sysfsBackingFile == backingFile {
 			var devNum int
-			fmt.Sscanf(name, "loop%d", &devNum)
+			_, _ = fmt.Sscanf(name, "loop%d", &devNum)
 			return &Device{
 				Path:   "/dev/" + name,
 				Number: devNum,
@@ -260,7 +259,7 @@ func FindBySerial(serial string) (*Device, error) {
 
 		if devSerial == serial {
 			var devNum int
-			fmt.Sscanf(name, "loop%d", &devNum)
+			_, _ = fmt.Sscanf(name, "loop%d", &devNum)
 			return &Device{
 				Path:   "/dev/" + name,
 				Number: devNum,

@@ -58,6 +58,7 @@ import (
 
 	erofsdiffer "github.com/aledbf/nexuserofs/internal/differ"
 	"github.com/aledbf/nexuserofs/internal/mountutils"
+	"github.com/aledbf/nexuserofs/internal/preflight"
 )
 
 func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
@@ -68,8 +69,8 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 	if err != nil {
 		t.Skipf("could not find mkfs.erofs: %v", err)
 	}
-	if !findErofs() {
-		t.Skip("check for erofs kernel support failed, skipping test")
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
 	}
 
 	tempDir := t.TempDir()
@@ -158,7 +159,7 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 		}
 		if expectMulti {
 			// Multi-layer: expect overlay with real paths
-			if len(lowerMounts) != 1 || lowerMounts[0].Type != "overlay" {
+			if len(lowerMounts) != 1 || lowerMounts[0].Type != testTypeOverlay {
 				t.Fatalf("expected single overlay mount for multi-layer, got: %#v", lowerMounts)
 			}
 		} else {
@@ -260,8 +261,8 @@ func TestErofsSnapshotterFsmetaSingleLayerView(t *testing.T) {
 	if err != nil {
 		t.Skipf("could not find mkfs.erofs: %v", err)
 	}
-	if !findErofs() {
-		t.Skip("check for erofs kernel support failed, skipping test")
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
 	}
 
 	tempDir := t.TempDir()
@@ -531,7 +532,7 @@ func TestErofsViewMountsMultiLayer(t *testing.T) {
 		t.Fatalf("expected single overlay mount, got %d mounts: %#v", len(viewMounts), viewMounts)
 	}
 
-	if viewMounts[0].Type != "overlay" {
+	if viewMounts[0].Type != testTypeOverlay {
 		t.Fatalf("expected overlay mount type, got: %s", viewMounts[0].Type)
 	}
 
@@ -824,8 +825,8 @@ func TestErofsBlockModeIgnoresFsMerge(t *testing.T) {
 	if err != nil {
 		t.Skipf("could not find mkfs.erofs: %v", err)
 	}
-	if !findErofs() {
-		t.Skip("check for erofs kernel support failed, skipping test")
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
 	}
 
 	tempDir := t.TempDir()
@@ -922,7 +923,7 @@ func TestErofsBlockModeIgnoresFsMerge(t *testing.T) {
 	if len(viewMounts) != 1 {
 		t.Fatalf("expected 1 mount, got %d", len(viewMounts))
 	}
-	if viewMounts[0].Type != "overlay" {
+	if viewMounts[0].Type != testTypeOverlay {
 		t.Fatalf("expected overlay mount, got %s", viewMounts[0].Type)
 	}
 
@@ -949,8 +950,8 @@ func TestErofsExtractSnapshotWithParents(t *testing.T) {
 	if err != nil {
 		t.Skipf("could not find mkfs.erofs: %v", err)
 	}
-	if !findErofs() {
-		t.Skip("check for erofs kernel support failed, skipping test")
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
 	}
 
 	tempDir := t.TempDir()
@@ -1058,8 +1059,8 @@ func TestErofsImmutableFlagOnCommit(t *testing.T) {
 	if err != nil {
 		t.Skipf("could not find mkfs.erofs: %v", err)
 	}
-	if !findErofs() {
-		t.Skip("check for erofs kernel support failed, skipping test")
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
 	}
 
 	tempDir := t.TempDir()
@@ -1139,8 +1140,8 @@ func TestErofsImmutableFlagClearedOnRemove(t *testing.T) {
 	if err != nil {
 		t.Skipf("could not find mkfs.erofs: %v", err)
 	}
-	if !findErofs() {
-		t.Skip("check for erofs kernel support failed, skipping test")
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
 	}
 
 	tempDir := t.TempDir()
@@ -1210,8 +1211,8 @@ func TestErofsConcurrentMounts(t *testing.T) {
 	if err != nil {
 		t.Skipf("could not find mkfs.erofs: %v", err)
 	}
-	if !findErofs() {
-		t.Skip("check for erofs kernel support failed, skipping test")
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
 	}
 
 	tempDir := t.TempDir()
@@ -1256,7 +1257,7 @@ func TestErofsConcurrentMounts(t *testing.T) {
 	results := make(chan []mount.Mount, numGoroutines)
 	errors := make(chan error, numGoroutines)
 
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(id int) {
 			mounts, err := s.Mounts(ctx, "concurrent-view")
 			if err != nil {
@@ -1269,7 +1270,7 @@ func TestErofsConcurrentMounts(t *testing.T) {
 
 	// Collect results
 	var allMounts [][]mount.Mount
-	for i := 0; i < numGoroutines; i++ {
+	for range numGoroutines {
 		select {
 		case mounts := <-results:
 			allMounts = append(allMounts, mounts)

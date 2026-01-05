@@ -60,23 +60,25 @@ import (
 
 	erofsdiffer "github.com/aledbf/nexuserofs/internal/differ"
 	erofsutils "github.com/aledbf/nexuserofs/internal/erofs"
+	"github.com/aledbf/nexuserofs/internal/preflight"
 )
 
 // Snapshot key constants used across tests
 const (
-	testKeyBase   = "base"
-	testKeyUpper  = "upper"
-	testKeyLower  = "lower"
-	testTypeExt4  = "ext4"
-	testTypeErofs = "erofs"
+	testKeyBase     = "base"
+	testKeyUpper    = "upper"
+	testKeyLower    = "lower"
+	testTypeExt4    = "ext4"
+	testTypeErofs   = "erofs"
+	testTypeOverlay = "overlay"
 )
 
 func TestErofsDifferWithTarIndexMode(t *testing.T) {
 	testutil.RequiresRoot(t)
 	ctx := t.Context()
 
-	if !findErofs() {
-		t.Skip("check for erofs kernel support failed, skipping test")
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
 	}
 
 	// Check if mkfs.erofs supports tar index mode
@@ -238,8 +240,8 @@ func TestErofsDifferCompareWithMountManager(t *testing.T) {
 	if err != nil {
 		t.Skipf("could not find mkfs.erofs: %v", err)
 	}
-	if !findErofs() {
-		t.Skip("check for erofs kernel support failed, skipping test")
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
 	}
 
 	tempDir := t.TempDir()
@@ -307,7 +309,7 @@ func TestErofsDifferCompareWithMountManager(t *testing.T) {
 	}
 
 	// Multi-layer view should return overlay mount
-	if len(lowerMounts) != 1 || lowerMounts[0].Type != "overlay" {
+	if len(lowerMounts) != 1 || lowerMounts[0].Type != testTypeOverlay {
 		t.Fatalf("expected single overlay mount for multi-layer view, got: %#v", lowerMounts)
 	}
 
@@ -345,8 +347,8 @@ func TestErofsDifferCompareBlockUpperFallback(t *testing.T) {
 	if err != nil {
 		t.Skipf("could not find mkfs.erofs: %v", err)
 	}
-	if !findErofs() {
-		t.Skip("check for erofs kernel support failed, skipping test")
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
 	}
 
 	tempDir := t.TempDir()
@@ -416,8 +418,8 @@ func TestErofsDifferComparePreservesWhiteouts(t *testing.T) {
 	if err != nil {
 		t.Skipf("could not find mkfs.erofs: %v", err)
 	}
-	if !findErofs() {
-		t.Skip("check for erofs kernel support failed, skipping test")
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
 	}
 
 	tempDir := t.TempDir()
@@ -501,8 +503,8 @@ func TestErofsDifferCompareWithFormattedUpperMounts(t *testing.T) {
 	if err != nil {
 		t.Skipf("could not find mkfs.erofs: %v", err)
 	}
-	if !findErofs() {
-		t.Skip("check for erofs kernel support failed, skipping test")
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
 	}
 
 	tempDir := t.TempDir()
@@ -582,8 +584,8 @@ func TestErofsDifferCompareWithoutMountManager(t *testing.T) {
 	if err != nil {
 		t.Skipf("could not find mkfs.erofs: %v", err)
 	}
-	if !findErofs() {
-		t.Skip("check for erofs kernel support failed, skipping test")
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
 	}
 
 	tempDir := t.TempDir()
@@ -657,8 +659,8 @@ func TestErofsDifferCompareMultipleStackedLayers(t *testing.T) {
 	if err != nil {
 		t.Skipf("could not find mkfs.erofs: %v", err)
 	}
-	if !findErofs() {
-		t.Skip("check for erofs kernel support failed, skipping test")
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
 	}
 
 	tempDir := t.TempDir()
@@ -727,7 +729,7 @@ func TestErofsDifferCompareMultipleStackedLayers(t *testing.T) {
 	}
 
 	// Multi-layer view should return single overlay mount
-	if len(lowerMounts) != 1 || lowerMounts[0].Type != "overlay" {
+	if len(lowerMounts) != 1 || lowerMounts[0].Type != testTypeOverlay {
 		t.Fatalf("expected single overlay mount for multi-layer view, got: %#v", lowerMounts)
 	}
 
@@ -761,8 +763,8 @@ func TestErofsDifferCompareEmptyLowerMounts(t *testing.T) {
 	if err != nil {
 		t.Skipf("could not find mkfs.erofs: %v", err)
 	}
-	if !findErofs() {
-		t.Skip("check for erofs kernel support failed, skipping test")
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
 	}
 
 	tempDir := t.TempDir()
@@ -844,8 +846,8 @@ func TestErofsDifferCompareContextCancellation(t *testing.T) {
 	if err != nil {
 		t.Skipf("could not find mkfs.erofs: %v", err)
 	}
-	if !findErofs() {
-		t.Skip("check for erofs kernel support failed, skipping test")
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
 	}
 
 	tempDir := t.TempDir()
@@ -923,8 +925,8 @@ func TestErofsDifferCompareSingleLayerView(t *testing.T) {
 	if err != nil {
 		t.Skipf("could not find mkfs.erofs: %v", err)
 	}
-	if !findErofs() {
-		t.Skip("check for erofs kernel support failed, skipping test")
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
 	}
 
 	tempDir := t.TempDir()
@@ -1028,8 +1030,8 @@ func TestErofsDifferCompareViewWithMultipleLayers(t *testing.T) {
 	if err != nil {
 		t.Skipf("could not find mkfs.erofs: %v", err)
 	}
-	if !findErofs() {
-		t.Skip("check for erofs kernel support failed, skipping test")
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
 	}
 
 	tempDir := t.TempDir()
@@ -1142,8 +1144,8 @@ func TestErofsDifferCompareDoesNotRequireMountManager(t *testing.T) {
 	if err != nil {
 		t.Skipf("could not find mkfs.erofs: %v", err)
 	}
-	if !findErofs() {
-		t.Skip("check for erofs kernel support failed, skipping test")
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
 	}
 
 	tempDir := t.TempDir()

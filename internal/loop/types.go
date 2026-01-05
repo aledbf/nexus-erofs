@@ -2,10 +2,9 @@ package loop
 
 // Loop device flags from <linux/loop.h>
 const (
-	LoFlagsReadOnly  = 1 << 0
-	LoFlagsAutoclear = 1 << 2
-	LoFlagsPartscan  = 1 << 3
-	LoFlagsDirectIO  = 1 << 4
+	LoFlagsReadOnly = 1 << 0
+	LoFlagsPartscan = 1 << 3
+	LoFlagsDirectIO = 1 << 4
 )
 
 // LoopInfo64 is the loop device info structure for LOOP_SET_STATUS64/LOOP_GET_STATUS64.
@@ -30,8 +29,6 @@ type LoopInfo64 struct {
 type Config struct {
 	// ReadOnly sets the loop device as read-only.
 	ReadOnly bool
-	// Autoclear automatically detaches the loop device when the last user closes it.
-	Autoclear bool
 	// DirectIO enables direct I/O mode.
 	DirectIO bool
 	// Serial is an optional serial number for the loop device (Linux 5.17+).
