@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -34,6 +33,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	erofsutils "github.com/aledbf/nexuserofs/internal/erofs"
+	"github.com/aledbf/nexuserofs/internal/loop"
 )
 
 // defaultWritableSize controls the default writable layer mode.
@@ -220,75 +220,30 @@ func upperDirectoryPermission(p, parent string) error {
 	return nil
 }
 
-// setupLoopDevice creates a loop device for the given file with a serial number.
-// The serial number format is "erofs-<id>" which can be used in udev rules.
-// Returns the loop device path (e.g., "/dev/loop0").
-func setupLoopDevice(backingFile, serialID string) (string, error) {
-	serial := fmt.Sprintf("erofs-%s", serialID)
-
-	// Use losetup to create loop device with serial number
-	// --find: find first unused loop device
-	// --show: print the device name
-	// --read-only: mount read-only (EROFS is read-only anyway)
-	// --set-serial: set the serial number for udev identification
-	cmd := exec.Command("losetup", "--find", "--show", "--read-only", "--set-serial", serial, backingFile)
-	output, err := cmd.Output()
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return "", fmt.Errorf("losetup failed: %w, stderr: %s", err, string(exitErr.Stderr))
-		}
-		return "", fmt.Errorf("losetup failed: %w", err)
-	}
-
-	loopDev := strings.TrimSpace(string(output))
-	if loopDev == "" {
-		return "", fmt.Errorf("losetup returned empty device path")
-	}
-
-	return loopDev, nil
-}
-
-// detachLoopDevice detaches a loop device.
-// Returns nil if the device doesn't exist or is already detached.
-func detachLoopDevice(loopDev string) error {
-	if loopDev == "" {
-		return nil
-	}
-
-	// Check if device exists
-	if _, err := os.Stat(loopDev); os.IsNotExist(err) {
-		return nil
-	}
-
-	cmd := exec.Command("losetup", "--detach", loopDev)
-	if err := cmd.Run(); err != nil {
-		// Ignore errors if the device is already detached or doesn't exist
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			// Exit code 1 usually means device not found or already detached
-			if exitErr.ExitCode() == 1 {
-				return nil
-			}
-		}
-		return fmt.Errorf("failed to detach loop device %s: %w", loopDev, err)
-	}
-
-	return nil
-}
-
 // mountErofsWithLoop mounts an EROFS image using a loop device with serial number.
 // The serial ID is used to create a unique identifier for udev rules.
 // Returns the loop device path for cleanup.
 func mountErofsWithLoop(backingFile, mountPoint, serialID string) (loopDev string, err error) {
 	// Setup loop device with serial
-	loopDev, err = setupLoopDevice(backingFile, serialID)
+	serial := ""
+	if serialID != "" {
+		serial = fmt.Sprintf("erofs-%s", serialID)
+	}
+
+	dev, err := loop.Setup(backingFile, loop.Config{
+		ReadOnly:  true,
+		Autoclear: true,
+		Serial:    serial,
+	})
 	if err != nil {
 		return "", fmt.Errorf("failed to setup loop device for %s: %w", backingFile, err)
 	}
+	loopDev = dev.Path
 
 	// Cleanup loop device if mount fails
 	defer func() {
 		if err != nil {
-			_ = detachLoopDevice(loopDev)
+			_ = dev.Detach()
 		}
 	}()
 
@@ -304,11 +259,7 @@ func mountErofsWithLoop(backingFile, mountPoint, serialID string) (loopDev strin
 // It finds the loop device backing the mount point before unmounting.
 func unmountAndDetachLoop(mountPoint string) error {
 	// Find the loop device backing this mount before unmounting
-	loopDev, err := findLoopDeviceForMount(mountPoint)
-	if err != nil {
-		// Log but continue - we still want to try unmounting
-		log.L.WithError(err).WithField("path", mountPoint).Debug("could not find loop device for mount")
-	}
+	loopDev := findLoopDeviceForMount(mountPoint)
 
 	// Unmount the filesystem
 	if err := unmountAll(mountPoint); err != nil {
@@ -317,7 +268,7 @@ func unmountAndDetachLoop(mountPoint string) error {
 
 	// Detach the loop device if we found one
 	if loopDev != "" {
-		if err := detachLoopDevice(loopDev); err != nil {
+		if err := loop.DetachPath(loopDev); err != nil {
 			log.L.WithError(err).WithField("device", loopDev).Debug("failed to detach loop device")
 		}
 	}
@@ -327,11 +278,11 @@ func unmountAndDetachLoop(mountPoint string) error {
 
 // findLoopDeviceForMount finds the loop device backing a mount point.
 // Returns empty string if not found or not a loop mount.
-func findLoopDeviceForMount(mountPoint string) (string, error) {
+func findLoopDeviceForMount(mountPoint string) string {
 	// Read /proc/mounts to find the device for this mount point
 	data, err := os.ReadFile("/proc/mounts")
 	if err != nil {
-		return "", fmt.Errorf("failed to read /proc/mounts: %w", err)
+		return ""
 	}
 
 	for _, line := range strings.Split(string(data), "\n") {
@@ -341,9 +292,9 @@ func findLoopDeviceForMount(mountPoint string) (string, error) {
 		}
 		device, target := fields[0], fields[1]
 		if target == mountPoint && strings.HasPrefix(device, "/dev/loop") {
-			return device, nil
+			return device
 		}
 	}
 
-	return "", nil
+	return ""
 }
