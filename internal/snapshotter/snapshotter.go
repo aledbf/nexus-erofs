@@ -175,8 +175,10 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		fsMergeThreshold: config.fsMergeThreshold,
 	}
 
-	// Clean up any orphaned mounts from previous runs
-	s.cleanupOrphanedMounts()
+	// Clean up any orphaned mounts from previous runs.
+	// This uses context.Background() internally since NewSnapshotter doesn't
+	// take a context (per containerd snapshotter interface convention).
+	s.cleanupOrphanedMounts() //nolint:contextcheck // startup cleanup uses background context
 
 	return s, nil
 }
