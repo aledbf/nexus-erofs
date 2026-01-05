@@ -35,23 +35,17 @@ The detection process:
 
 ## Solution
 
-nexuserofs sets a unique serial number on each loop device via sysfs (`/sys/block/loopN/loop/serial`). All serials use the `erofs-` prefix, allowing udev rules to identify and handle these devices specially.
+Skip SCSI ID detection and suppress warnings for all loop devices. Loop devices are **never** SCSI devices, so this is always safe.
 
 ### Installation
 
+Create a udev rule file numbered **before** `55-scsi-sg3_id.rules` (e.g., `49-`):
+
 ```bash
-sudo tee /etc/udev/rules.d/50-nexuserofs-loop.rules << 'EOF'
-# nexuserofs EROFS loop device optimization
-# Matches loop devices with serial numbers set by nexuserofs (erofs-* prefix)
-
-# Match EROFS loop devices by serial and set device type
-KERNEL=="loop*", ENV{ID_SERIAL}=="erofs-*", ENV{ID_TYPE}="erofs"
-
-# Suppress SCSI ID warnings for EROFS loop devices
-KERNEL=="loop*", ENV{ID_SERIAL}=="erofs-*", OPTIONS+="nowatch"
-
-# Skip SCSI ID detection for EROFS loop devices
-KERNEL=="loop*", ENV{ID_SERIAL}=="erofs-*", ENV{ID_SCSI}="0", ENV{ID_SCSI_INQUIRY}="0"
+sudo tee /etc/udev/rules.d/49-skip-loop-scsi.rules << 'EOF'
+# Skip SCSI detection and warnings for all loop devices
+# Sets ID_SERIAL to prevent the 55-scsi-sg3_id.rules warning
+SUBSYSTEM=="block", KERNEL=="loop*", ENV{ID_SERIAL}="loop", ENV{ID_SCSI}="0", ENV{ID_SCSI_INQUIRY}="0"
 EOF
 
 sudo udevadm control --reload-rules
@@ -59,69 +53,67 @@ sudo udevadm control --reload-rules
 
 ### How It Works
 
-nexuserofs assigns a serial number to each loop device when mounting EROFS layers:
-- Format: `erofs-<snapshot-id>` (e.g., `erofs-42`, `erofs-sha256-abc123`)
-- Serial is written to `/sys/block/loopN/loop/serial` (requires kernel 5.17+)
-- udev reads this as `ID_SERIAL` environment variable
+| Rule Component | Purpose |
+|----------------|---------|
+| `SUBSYSTEM=="block"` | Match block devices only |
+| `KERNEL=="loop*"` | Match loop device names (loop0, loop1, etc.) |
+| `ENV{ID_SERIAL}="loop"` | Set a serial to prevent "no device ID" warning |
+| `ENV{ID_SCSI}="0"` | Mark device as non-SCSI |
+| `ENV{ID_SCSI_INQUIRY}="0"` | Disable SCSI inquiry commands |
 
-The udev rules then:
+The rule file is numbered `49-` to ensure it runs **before** `55-scsi-sg3_id.rules`.
 
-| Rule | Purpose |
-|------|---------|
-| `ENV{ID_TYPE}="erofs"` | Tags the device type for identification |
-| `OPTIONS+="nowatch"` | Disables inotify watching, reducing overhead |
-| `ENV{ID_SCSI}="0"` | Marks device as non-SCSI |
-| `ENV{ID_SCSI_INQUIRY}="0"` | Disables SCSI inquiry commands |
-
-### Rule Syntax Explanation
-
+The `55-scsi-sg3_id.rules` file logs a warning for any disk device without `ID_SERIAL`:
 ```
-KERNEL=="loop*", ENV{ID_SERIAL}=="erofs-*", ENV{ID_SCSI}="0"
-       ^                ^                          ^
-       |                |                          |
-  Match loop      Match serial               Set ID_SCSI
-  devices         prefix "erofs-"            to "0"
+ENV{ID_SERIAL}!="?*", ENV{DEVTYPE}=="disk", PROGRAM="/bin/logger ... WARNING: SCSI device %k has no device ID ..."
 ```
 
-- `==` is a match operator (condition)
-- `=` is an assignment operator (action)
-- `erofs-*` uses glob pattern matching
+By setting `ID_SERIAL="loop"`, this warning condition becomes false and no warning is logged.
 
 ### Verification
 
 After applying the rules:
 
 ```bash
-# Check serial is set on a loop device
-cat /sys/block/loop0/loop/serial
+# Reload rules
+sudo udevadm control --reload-rules
 
-# Verify udev sees the serial
-udevadm info --query=property --name=/dev/loop0 | grep -E 'ID_SERIAL|ID_TYPE'
+# Trigger a change event on existing loop devices
+sudo udevadm trigger --subsystem-match=block --attr-match=loop/backing_file
+
+# Verify properties are set correctly
+udevadm info --query=property --name=/dev/loop0 | grep -E 'ID_SERIAL|ID_SCSI'
 
 # Monitor udev events during container operations
 udevadm monitor --property --subsystem-match=block
 ```
 
-Expected output for nexuserofs loop devices:
+Expected output:
 ```
-ID_SERIAL=erofs-42
-ID_TYPE=erofs
-```
-
-## Fallback: Skip All Loop Device SCSI Detection
-
-If you want to skip SCSI detection for ALL loop devices (not just nexuserofs):
-
-```bash
-sudo tee /etc/udev/rules.d/50-skip-loop-scsi.rules << 'EOF'
-# Skip SCSI ID detection for all loop devices
-SUBSYSTEM=="block", KERNEL=="loop*", ENV{ID_SCSI}="0", ENV{ID_SCSI_INQUIRY}="0"
-EOF
-
-sudo udevadm control --reload-rules
+ID_SERIAL=loop
+ID_SCSI=0
+ID_SCSI_INQUIRY=0
 ```
 
-This is less targeted but effective if you don't use loop devices for real SCSI passthrough.
+## Serial Numbers for Device Identification
+
+nexuserofs still sets serial numbers on loop devices for **identification purposes** (not for udev matching):
+
+- Format: `erofs-<snapshot-id>` (e.g., `erofs-42`, `erofs-sha256-abc123`)
+- Written to `/sys/block/loopN/loop/serial` (requires kernel 5.17+)
+- Used by nexuserofs to find/manage its loop devices
+- Visible via: `cat /sys/block/loop0/loop/serial`
+
+### Why Not Match on Serial?
+
+You might wonder why we don't match on `ENV{ID_SERIAL}=="erofs-*"` instead of all loop devices. The reason is a **race condition**:
+
+1. Loop device is created → udev `add` event fires immediately
+2. nexuserofs writes serial to sysfs AFTER device creation
+3. udev rules process the event BEFORE serial is written
+4. `55-scsi-sg3_id.rules` runs, serial isn't set yet, warnings appear
+
+Since loop devices are never SCSI devices, skipping SCSI detection for ALL loop devices is the correct, race-free solution.
 
 ## Performance Impact
 
@@ -132,7 +124,7 @@ Without the fix:
 - Log spam with warnings
 
 With the fix:
-- Zero `sg_inq` processes for nexuserofs loop devices
+- Zero `sg_inq` processes for loop devices
 - No CPU overhead from SCSI detection
 - Clean logs
 - Fast container startup
@@ -140,7 +132,6 @@ With the fix:
 ## Requirements
 
 - Linux kernel 5.17+ (for loop device serial number support via sysfs)
-- nexuserofs snapshotter (automatically sets serial numbers)
 - `sg3-utils` package installed (the source of SCSI detection overhead)
 
 ## References
