@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -17,13 +15,11 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	"github.com/moby/sys/mountinfo"
+	"github.com/opencontainers/go-digest"
 
 	"github.com/aledbf/nexus-erofs/internal/erofs"
 	"github.com/aledbf/nexus-erofs/internal/fsverity"
 )
-
-// blobDigestRegex extracts the digest from sha256-<hex>.erofs filenames.
-var blobDigestRegex = regexp.MustCompile(`^sha256-([a-f0-9]+)\.erofs$`)
 
 // commitBlock handles the conversion of a writable layer to EROFS.
 // It supports both block mode (ext4 image) and directory mode (overlay upper).
@@ -182,12 +178,11 @@ func (s *snapshotter) generateFsMeta(ctx context.Context, snapIDs []string) {
 // Format: one digest per line (sha256:hex...), newest layer first.
 // This is the authoritative source for VMDK layer order verification.
 func (s *snapshotter) writeLayerManifest(manifestFile string, blobs []string) error {
-	var digests []string
+	var digests []digest.Digest
 	for _, blob := range blobs {
-		filename := filepath.Base(blob)
-		matches := blobDigestRegex.FindStringSubmatch(filename)
-		if matches != nil {
-			digests = append(digests, "sha256:"+matches[1])
+		d := erofs.DigestFromLayerBlobPath(blob)
+		if d != "" {
+			digests = append(digests, d)
 		}
 		// Skip non-digest-based blobs (e.g., snapshot-xxx.erofs fallback)
 	}
@@ -196,7 +191,12 @@ func (s *snapshotter) writeLayerManifest(manifestFile string, blobs []string) er
 		return nil // No digests to write
 	}
 
-	content := strings.Join(digests, "\n") + "\n"
+	var lines []string
+	for _, d := range digests {
+		lines = append(lines, d.String())
+	}
+
+	content := strings.Join(lines, "\n") + "\n"
 	return os.WriteFile(manifestFile, []byte(content), 0644)
 }
 
