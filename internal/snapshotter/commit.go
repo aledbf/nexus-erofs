@@ -85,6 +85,23 @@ func (s *snapshotter) commitBlock(ctx context.Context, layerBlob string, id stri
 // generateFsMeta creates a merged fsmeta.erofs and VMDK descriptor for VM runtimes.
 // The VMDK allows QEMU to present all EROFS layers as a single concatenated block device.
 // This is always called when there are parent layers (no threshold - VM runtimes need this).
+//
+// Layer ordering:
+//
+// OCI Image Manifest specifies layers in bottom-to-top order (base layer at index 0):
+// https://github.com/opencontainers/image-spec/blob/main/manifest.md
+// > "The array MUST have the base layer at index 0. Subsequent layers MUST then
+// > follow in stack order (i.e. from layers[0] to layers[len(layers)-1])."
+//
+// VMDK extents are listed in sequential disk order (first extent = first sectors):
+// https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc
+//
+// For overlay filesystems, layers are applied top-to-bottom (newest first) when resolving files.
+// mkfs.erofs multidev mode expects layers in top-to-bottom order (newest first).
+//
+// Therefore: VMDK layer order = REVERSE of OCI manifest order
+// - VMDK: [fsmeta, layer_n, layer_n-1, ..., layer_0] (top to bottom)
+// - OCI:  [layer_0, layer_1, ..., layer_n]           (bottom to top)
 func (s *snapshotter) generateFsMeta(ctx context.Context, snapIDs []string) {
 	var blobs []string
 

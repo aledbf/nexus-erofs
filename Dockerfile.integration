@@ -64,6 +64,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libuuid1 \
     xxd \
     isal \
+    jq \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy erofs-utils binaries from builder

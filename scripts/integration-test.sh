@@ -1023,54 +1023,68 @@ test_vmdk_layer_order() {
     manifest_digest=$(ctr_cmd images ls | grep "${MULTI_LAYER_IMAGE}" | awk '{print $3}')
 
     if [ -z "$manifest_digest" ]; then
-        log_warn "Could not find manifest digest, skipping layer order comparison"
-        return 0
+        log_error "Could not find manifest digest for ${MULTI_LAYER_IMAGE}"
+        return 1
     fi
     log_debug "Manifest digest: $manifest_digest"
 
     # Fetch manifest content - handle manifest lists (multi-arch)
     local manifest_content
-    manifest_content=$(ctr_cmd content get "$manifest_digest" 2>/dev/null || echo "")
+    manifest_content=$(ctr_cmd content get "$manifest_digest" 2>/dev/null)
 
     if [ -z "$manifest_content" ]; then
-        log_warn "Could not fetch manifest content, skipping layer order comparison"
-        return 0
+        log_error "Could not fetch manifest content"
+        return 1
     fi
 
     # Check if this is a manifest list (multi-arch) - look for "manifests" array
     if echo "$manifest_content" | grep -q '"manifests"'; then
         log_debug "Found manifest list, extracting amd64 manifest..."
-        # Extract the amd64 manifest digest
+        # Extract the amd64 manifest digest using sed to find the digest after "amd64"
         local arch_digest
-        arch_digest=$(echo "$manifest_content" | grep -B2 '"amd64"' | grep '"digest"' | head -1 | grep -oE 'sha256:[a-f0-9]+')
+        arch_digest=$(echo "$manifest_content" | tr ',' '\n' | grep -A5 '"amd64"' | grep '"digest"' | head -1 | sed 's/.*"sha256:\([a-f0-9]*\)".*/sha256:\1/')
         if [ -n "$arch_digest" ]; then
             log_debug "AMD64 manifest: $arch_digest"
-            manifest_content=$(ctr_cmd content get "$arch_digest" 2>/dev/null || echo "")
+            manifest_content=$(ctr_cmd content get "$arch_digest" 2>/dev/null)
         fi
     fi
 
-    # Extract blob digests from manifest layers array (bottom-to-top order in manifest)
+    # Parse manifest JSON to extract layer digests
+    # The manifest has a "layers" array with objects containing "digest" fields
     local manifest_blobs=()
-    while IFS= read -r digest; do
-        if [[ "$digest" =~ sha256:([a-f0-9]+) ]]; then
-            manifest_blobs+=("${BASH_REMATCH[1]}")
-        fi
-    done < <(echo "$manifest_content" | grep -A1 '"layers"' | grep -oE 'sha256:[a-f0-9]+' || \
-             echo "$manifest_content" | grep '"digest"' | grep -oE 'sha256:[a-f0-9]+' | tail -n +2)
 
-    # If grep approach didn't work, try a simpler pattern
-    if [ ${#manifest_blobs[@]} -eq 0 ]; then
-        while IFS= read -r line; do
-            if [[ "$line" =~ \"digest\".*\"sha256:([a-f0-9]+)\" ]]; then
+    # Try jq first if available (most reliable)
+    if command -v jq &>/dev/null; then
+        log_debug "Using jq to parse manifest"
+        while IFS= read -r digest; do
+            if [[ "$digest" =~ ^sha256:([a-f0-9]{64})$ ]]; then
                 manifest_blobs+=("${BASH_REMATCH[1]}")
             fi
-        done < <(echo "$manifest_content" | grep -v config)
+        done < <(echo "$manifest_content" | jq -r '.layers[]?.digest // empty' 2>/dev/null)
+    fi
+
+    # Fallback: manual parsing if jq not available or failed
+    if [ ${#manifest_blobs[@]} -eq 0 ]; then
+        log_debug "Using manual parsing for manifest"
+        # Extract the layers section - find content between "layers":[ and the matching ]
+        # This handles nested braces in layer objects
+        local layers_json
+        layers_json=$(echo "$manifest_content" | tr -d '\n\r' | grep -oP '"layers"\s*:\s*\[\K[^\]]+(?=\])' || true)
+
+        if [ -n "$layers_json" ]; then
+            # Extract sha256 digests from the layers section
+            while IFS= read -r digest; do
+                if [[ "$digest" =~ ^[a-f0-9]{64}$ ]]; then
+                    manifest_blobs+=("$digest")
+                fi
+            done < <(echo "$layers_json" | grep -oE '"digest"\s*:\s*"sha256:[a-f0-9]{64}"' | grep -oE '[a-f0-9]{64}')
+        fi
     fi
 
     if [ ${#manifest_blobs[@]} -eq 0 ]; then
-        log_warn "Could not parse blob digests from manifest, skipping layer order comparison"
-        log_debug "Manifest content preview: $(echo "$manifest_content" | head -20)"
-        return 0
+        log_error "Could not parse blob digests from manifest"
+        log_debug "Manifest content (first 500 chars): ${manifest_content:0:500}"
+        return 1
     fi
 
     log_info "Found ${#manifest_blobs[@]} layers in manifest (bottom-to-top order):"

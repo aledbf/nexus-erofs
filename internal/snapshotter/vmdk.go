@@ -31,6 +31,13 @@ var digestFilenameRegex = regexp.MustCompile(`^sha256-([a-f0-9]+)\.erofs$`)
 // ParseVMDK reads a VMDK descriptor file and extracts layer information.
 // Returns layers in the order they appear in the VMDK (fsmeta first, then layers
 // from newest/top to oldest/bottom).
+//
+// VMDK layer order is the REVERSE of OCI manifest order:
+// - OCI manifest: [layer_0, layer_1, ..., layer_n] (bottom to top, base first)
+// - VMDK:         [fsmeta, layer_n, ..., layer_1, layer_0] (top to bottom, newest first)
+//
+// See: https://github.com/opencontainers/image-spec/blob/main/manifest.md
+// See: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc
 func ParseVMDK(vmdkPath string) ([]VMDKLayerInfo, error) {
 	f, err := os.Open(vmdkPath)
 	if err != nil {
@@ -96,8 +103,9 @@ func ExtractLayerDigests(layers []VMDKLayerInfo) []string {
 	return digests
 }
 
-// ReverseDigests reverses a slice of digests (useful for comparing VMDK order
-// with manifest order, since they use opposite conventions).
+// ReverseDigests reverses a slice of digests.
+// Use this to convert between VMDK order (top-to-bottom) and OCI manifest order (bottom-to-top).
+// See: https://github.com/opencontainers/image-spec/blob/main/manifest.md
 func ReverseDigests(digests []string) []string {
 	reversed := make([]string, len(digests))
 	for i, d := range digests {
