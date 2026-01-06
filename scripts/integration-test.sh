@@ -995,71 +995,125 @@ test_vmdk_layer_order() {
         log_info "  [$i] sha256:${vmdk_digests[$i]:0:12}..."
     done
 
-    # Get layer digests from the pulled image using nerdctl
-    # The RootFS.DiffIDs are in bottom-to-top order (oldest first)
-    local manifest_digests=()
-
-    log_info "Fetching layer info from pulled image..."
-    local image_inspect
-    image_inspect=$(nerdctl image inspect "${MULTI_LAYER_IMAGE}" 2>/dev/null || echo "")
-
-    if [ -n "$image_inspect" ]; then
-        # Extract DiffIDs from RootFS section (these are the layer digests in order)
-        while IFS= read -r digest; do
-            if [[ "$digest" =~ sha256:([a-f0-9]+) ]]; then
-                manifest_digests+=("${BASH_REMATCH[1]}")
+    # Verify all layer files referenced in VMDK actually exist
+    log_info "Verifying all VMDK layer files exist..."
+    local missing_count=0
+    while IFS= read -r line; do
+        if [[ "$line" =~ FLAT[[:space:]]+\"([^\"]+)\" ]]; then
+            local layer_path="${BASH_REMATCH[1]}"
+            if [ ! -f "$layer_path" ]; then
+                log_error "Missing layer file: $layer_path"
+                ((missing_count++))
             fi
-        done < <(echo "$image_inspect" | grep -oE '"sha256:[a-f0-9]+"' | tr -d '"' | uniq)
-
-        log_info "Found ${#manifest_digests[@]} layers in image (bottom-to-top order):"
-        for i in "${!manifest_digests[@]}"; do
-            log_info "  [$i] sha256:${manifest_digests[$i]:0:12}..."
-        done
-    else
-        log_warn "Could not inspect image, skipping layer order comparison"
-    fi
-
-    # Compare orders if we got manifest digests
-    if [ ${#manifest_digests[@]} -gt 0 ] && [ ${#vmdk_digests[@]} -gt 0 ]; then
-        # VMDK order: fsmeta first, then layers from newest to oldest (top-to-bottom)
-        # Manifest order: oldest to newest (bottom-to-top)
-        # So VMDK layers should be the reverse of manifest layers
-
-        log_info "Comparing layer orders..."
-        log_info "  VMDK order (newest first): ${vmdk_digests[*]:0:3}..."
-        log_info "  Manifest order (oldest first): ${manifest_digests[*]:0:3}..."
-
-        # Reverse manifest order to compare with VMDK
-        local manifest_reversed=()
-        for ((i=${#manifest_digests[@]}-1; i>=0; i--)); do
-            manifest_reversed+=("${manifest_digests[$i]}")
-        done
-
-        # Check if first few digests match (comparing prefixes)
-        local match_count=0
-        local check_count=$((${#vmdk_digests[@]} < ${#manifest_reversed[@]} ? ${#vmdk_digests[@]} : ${#manifest_reversed[@]}))
-
-        for ((i=0; i<check_count; i++)); do
-            # Compare first 12 chars of digest (should be enough for uniqueness)
-            if [ "${vmdk_digests[$i]:0:12}" = "${manifest_reversed[$i]:0:12}" ]; then
-                ((match_count++))
-            else
-                log_debug "Mismatch at position $i: VMDK=${vmdk_digests[$i]:0:12} vs Manifest=${manifest_reversed[$i]:0:12}"
-            fi
-        done
-
-        if [ "$match_count" -eq "$check_count" ]; then
-            log_info "✓ VMDK layer order matches registry manifest (reversed)"
-        else
-            log_warn "Layer order may not match: $match_count/$check_count matched"
-            log_warn "This could indicate a layer ordering issue"
-            # Don't fail the test, just warn - there could be legitimate differences
         fi
-    else
-        log_info "Could not compare layer orders (manifest: ${#manifest_digests[@]}, vmdk: ${#vmdk_digests[@]})"
+    done < "$vmdk_file"
+
+    if [ "$missing_count" -gt 0 ]; then
+        log_error "VMDK references $missing_count missing layer files"
+        return 1
+    fi
+    log_info "✓ All layer files exist"
+
+    # Get blob digests from the registry manifest to compare with VMDK
+    # Unlike DiffIDs (uncompressed), blob digests match what's in the VMDK
+    log_info "Fetching manifest blob digests for layer order verification..."
+
+    # Get the manifest digest for the image
+    local manifest_digest
+    manifest_digest=$(ctr_cmd images ls | grep "${MULTI_LAYER_IMAGE}" | awk '{print $3}')
+
+    if [ -z "$manifest_digest" ]; then
+        log_warn "Could not find manifest digest, skipping layer order comparison"
+        return 0
+    fi
+    log_debug "Manifest digest: $manifest_digest"
+
+    # Fetch manifest content - handle manifest lists (multi-arch)
+    local manifest_content
+    manifest_content=$(ctr_cmd content get "$manifest_digest" 2>/dev/null || echo "")
+
+    if [ -z "$manifest_content" ]; then
+        log_warn "Could not fetch manifest content, skipping layer order comparison"
+        return 0
     fi
 
-    return 0
+    # Check if this is a manifest list (multi-arch) - look for "manifests" array
+    if echo "$manifest_content" | grep -q '"manifests"'; then
+        log_debug "Found manifest list, extracting amd64 manifest..."
+        # Extract the amd64 manifest digest
+        local arch_digest
+        arch_digest=$(echo "$manifest_content" | grep -B2 '"amd64"' | grep '"digest"' | head -1 | grep -oE 'sha256:[a-f0-9]+')
+        if [ -n "$arch_digest" ]; then
+            log_debug "AMD64 manifest: $arch_digest"
+            manifest_content=$(ctr_cmd content get "$arch_digest" 2>/dev/null || echo "")
+        fi
+    fi
+
+    # Extract blob digests from manifest layers array (bottom-to-top order in manifest)
+    local manifest_blobs=()
+    while IFS= read -r digest; do
+        if [[ "$digest" =~ sha256:([a-f0-9]+) ]]; then
+            manifest_blobs+=("${BASH_REMATCH[1]}")
+        fi
+    done < <(echo "$manifest_content" | grep -A1 '"layers"' | grep -oE 'sha256:[a-f0-9]+' || \
+             echo "$manifest_content" | grep '"digest"' | grep -oE 'sha256:[a-f0-9]+' | tail -n +2)
+
+    # If grep approach didn't work, try a simpler pattern
+    if [ ${#manifest_blobs[@]} -eq 0 ]; then
+        while IFS= read -r line; do
+            if [[ "$line" =~ \"digest\".*\"sha256:([a-f0-9]+)\" ]]; then
+                manifest_blobs+=("${BASH_REMATCH[1]}")
+            fi
+        done < <(echo "$manifest_content" | grep -v config)
+    fi
+
+    if [ ${#manifest_blobs[@]} -eq 0 ]; then
+        log_warn "Could not parse blob digests from manifest, skipping layer order comparison"
+        log_debug "Manifest content preview: $(echo "$manifest_content" | head -20)"
+        return 0
+    fi
+
+    log_info "Found ${#manifest_blobs[@]} layers in manifest (bottom-to-top order):"
+    for i in "${!manifest_blobs[@]}"; do
+        log_info "  [$i] sha256:${manifest_blobs[$i]:0:12}..."
+    done
+
+    # VMDK order should be: fsmeta first, then layers from top-to-bottom (newest first)
+    # Manifest order is: bottom-to-top (oldest first)
+    # So VMDK layers should be the REVERSE of manifest layers
+
+    # Reverse manifest order for comparison
+    local manifest_reversed=()
+    for ((i=${#manifest_blobs[@]}-1; i>=0; i--)); do
+        manifest_reversed+=("${manifest_blobs[$i]}")
+    done
+
+    log_info "Comparing VMDK layer order with manifest..."
+    log_info "  VMDK (top-to-bottom):     ${vmdk_digests[0]:0:12}... -> ${vmdk_digests[-1]:0:12}..."
+    log_info "  Manifest reversed (same): ${manifest_reversed[0]:0:12}... -> ${manifest_reversed[-1]:0:12}..."
+
+    # Compare layer orders
+    local match_count=0
+    local check_count=$((${#vmdk_digests[@]} < ${#manifest_reversed[@]} ? ${#vmdk_digests[@]} : ${#manifest_reversed[@]}))
+
+    for ((i=0; i<check_count; i++)); do
+        if [ "${vmdk_digests[$i]}" = "${manifest_reversed[$i]}" ]; then
+            ((match_count++))
+        else
+            log_debug "Mismatch at [$i]: VMDK=${vmdk_digests[$i]:0:12} vs Manifest=${manifest_reversed[$i]:0:12}"
+        fi
+    done
+
+    if [ "$match_count" -eq "$check_count" ] && [ "$check_count" -eq "${#vmdk_digests[@]}" ]; then
+        log_info "✓ VMDK layer order matches registry manifest (all $match_count layers)"
+        return 0
+    else
+        log_error "Layer order mismatch: $match_count/$check_count layers matched"
+        log_error "VMDK has ${#vmdk_digests[@]} layers, manifest has ${#manifest_blobs[@]} layers"
+        log_error "VMDK layers:     ${vmdk_digests[*]:0:3}..."
+        log_error "Expected order:  ${manifest_reversed[*]:0:3}..."
+        return 1
+    fi
 }
 
 # Test: Create a new image using the integration-commit tool
