@@ -1165,6 +1165,123 @@ test_rwlayer_creation() {
     ctr_cmd snapshots --snapshotter nexus-erofs rm "$snap_name" 2>/dev/null || true
 }
 
+# Test: Full cleanup - delete everything and verify no leaking files
+test_full_cleanup_no_leaks() {
+    log_info "Starting full cleanup test..."
+
+    # Get list of all images
+    local images
+    images=$(ctr_cmd images ls -q 2>/dev/null || true)
+
+    # Remove all images (this should cascade delete snapshots)
+    if [ -n "$images" ]; then
+        log_info "Removing all images..."
+        echo "$images" | while read -r img; do
+            if [ -n "$img" ]; then
+                log_debug "Removing image: $img"
+                ctr_cmd images rm "$img" 2>/dev/null || true
+            fi
+        done
+    fi
+
+    # Force remove any remaining snapshots
+    local snapshots
+    snapshots=$(ctr_cmd snapshots --snapshotter nexus-erofs ls 2>/dev/null | grep -v "^KEY" | awk '{print $1}' || true)
+
+    if [ -n "$snapshots" ]; then
+        log_info "Removing remaining snapshots..."
+        echo "$snapshots" | while read -r snap; do
+            if [ -n "$snap" ]; then
+                log_debug "Removing snapshot: $snap"
+                ctr_cmd snapshots --snapshotter nexus-erofs rm "$snap" 2>/dev/null || true
+            fi
+        done
+    fi
+
+    # Wait a moment for cleanup to complete
+    sleep 1
+
+    # Verify no snapshots remain
+    local remaining_snaps
+    remaining_snaps=$(ctr_cmd snapshots --snapshotter nexus-erofs ls 2>/dev/null | grep -v "^KEY" | wc -l)
+    if [ "$remaining_snaps" -gt 0 ]; then
+        log_error "Found $remaining_snaps snapshots still registered after cleanup"
+        ctr_cmd snapshots --snapshotter nexus-erofs ls >&2 || true
+        return 1
+    fi
+    log_info "All snapshots removed from registry"
+
+    # Check for leaked files in snapshots directory
+    local snapshots_dir="${SNAPSHOTTER_ROOT}/snapshots"
+
+    if [ -d "$snapshots_dir" ]; then
+        # Count remaining snapshot directories
+        local remaining_dirs
+        remaining_dirs=$(find "$snapshots_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+
+        if [ "$remaining_dirs" -gt 0 ]; then
+            log_error "Found $remaining_dirs leaked snapshot directories:"
+            find "$snapshots_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -10 >&2
+            log_error "Contents of first leaked directory:"
+            local first_dir
+            first_dir=$(find "$snapshots_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)
+            if [ -n "$first_dir" ]; then
+                ls -la "$first_dir" >&2 || true
+            fi
+            return 1
+        fi
+        log_info "No leaked snapshot directories found"
+
+        # Check for any orphaned files at root level
+        local orphan_files
+        orphan_files=$(find "$snapshots_dir" -maxdepth 1 -type f 2>/dev/null | wc -l)
+        if [ "$orphan_files" -gt 0 ]; then
+            log_warn "Found $orphan_files orphaned files in snapshots root:"
+            find "$snapshots_dir" -maxdepth 1 -type f 2>/dev/null >&2
+        fi
+    fi
+
+    # Check for leaked EROFS files anywhere
+    local leaked_erofs
+    leaked_erofs=$(find "$SNAPSHOTTER_ROOT" -name "*.erofs" 2>/dev/null | wc -l)
+    if [ "$leaked_erofs" -gt 0 ]; then
+        log_error "Found $leaked_erofs leaked EROFS files:"
+        find "$SNAPSHOTTER_ROOT" -name "*.erofs" 2>/dev/null | head -10 >&2
+        return 1
+    fi
+
+    # Check for leaked VMDK files
+    local leaked_vmdk
+    leaked_vmdk=$(find "$SNAPSHOTTER_ROOT" -name "*.vmdk" 2>/dev/null | wc -l)
+    if [ "$leaked_vmdk" -gt 0 ]; then
+        log_error "Found $leaked_vmdk leaked VMDK files:"
+        find "$SNAPSHOTTER_ROOT" -name "*.vmdk" 2>/dev/null | head -10 >&2
+        return 1
+    fi
+
+    # Check for leaked rwlayer.img files
+    local leaked_rwlayer
+    leaked_rwlayer=$(find "$SNAPSHOTTER_ROOT" -name "rwlayer.img" 2>/dev/null | wc -l)
+    if [ "$leaked_rwlayer" -gt 0 ]; then
+        log_error "Found $leaked_rwlayer leaked rwlayer.img files:"
+        find "$SNAPSHOTTER_ROOT" -name "rwlayer.img" 2>/dev/null | head -10 >&2
+        return 1
+    fi
+
+    # Summary of what's left (should just be metadata.db)
+    log_info "Remaining files in snapshotter root:"
+    find "$SNAPSHOTTER_ROOT" -type f 2>/dev/null | while read -r f; do
+        log_info "  $(basename "$f")"
+    done
+
+    # metadata.db should exist but be clean
+    if [ -f "${SNAPSHOTTER_ROOT}/metadata.db" ]; then
+        log_info "metadata.db exists (expected)"
+    fi
+
+    log_info "Full cleanup test passed - no leaked files detected"
+}
+
 # =============================================================================
 # Test Execution
 # =============================================================================
@@ -1181,6 +1298,7 @@ ALL_TESTS=(
     test_snapshot_cleanup
     test_commit
     test_nerdctl
+    test_full_cleanup_no_leaks  # Must be last - removes everything
 )
 
 # Show test timing summary
