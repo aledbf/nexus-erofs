@@ -27,7 +27,9 @@ LOG_DIR="/tmp/integration-logs"
 
 # Use ghcr.io or quay.io to avoid Docker Hub rate limits
 TEST_IMAGE="${TEST_IMAGE:-ghcr.io/containerd/alpine:3.14.0}"
-MULTI_LAYER_IMAGE="${MULTI_LAYER_IMAGE:-ghcr.io/containerd/busybox:1.36}"
+# Use nginx:alpine for multi-layer test - it has 6-7 layers (~25MB)
+# busybox and alpine only have 1 layer which doesn't test VMDK properly
+MULTI_LAYER_IMAGE="${MULTI_LAYER_IMAGE:-docker.io/library/nginx:1.27-alpine}"
 
 # Runtime options
 CLEANUP_ON_EXIT="${CLEANUP_ON_EXIT:-true}"
@@ -832,29 +834,39 @@ test_multi_layer() {
         return 1
     fi
 
-    # Count snapshots
+    # Count snapshots (subtract 1 for header line)
     local snap_count
     snap_count=$(ctr_cmd snapshots --snapshotter nexus-erofs ls | wc -l)
+    snap_count=$((snap_count - 1))
 
-    log_info "Multi-layer image created $((snap_count - 1)) snapshots"
+    log_info "Multi-layer image created $snap_count snapshots"
 
-    # Verify VMDK generation (check for merged.vmdk in snapshot directories)
+    # Verify we actually have multiple layers
+    if [ "$snap_count" -lt 2 ]; then
+        log_error "Expected multiple snapshots for multi-layer image, got $snap_count"
+        log_error "Image ${MULTI_LAYER_IMAGE} may only have 1 layer"
+        return 1
+    fi
+
+    # Verify VMDK generation (required for multi-layer images)
     local vmdk_count
     vmdk_count=$(find "${SNAPSHOTTER_ROOT}/snapshots" -name "merged.vmdk" 2>/dev/null | wc -l)
 
-    if [ "$vmdk_count" -gt 0 ]; then
-        log_info "VMDK descriptors generated: $vmdk_count"
-    else
-        log_debug "No VMDK descriptors found (may be expected for some configurations)"
+    if [ "$vmdk_count" -eq 0 ]; then
+        log_error "No VMDK descriptors found for multi-layer image"
+        return 1
     fi
+    log_info "VMDK descriptors generated: $vmdk_count"
 
     # Verify fsmeta.erofs exists for multi-layer
     local fsmeta_count
     fsmeta_count=$(find "${SNAPSHOTTER_ROOT}/snapshots" -name "fsmeta.erofs" 2>/dev/null | wc -l)
 
-    if [ "$fsmeta_count" -gt 0 ]; then
-        log_info "Fsmeta files generated: $fsmeta_count"
+    if [ "$fsmeta_count" -eq 0 ]; then
+        log_error "No fsmeta.erofs found for multi-layer image"
+        return 1
     fi
+    log_info "Fsmeta files generated: $fsmeta_count"
 }
 
 # Test: Verify EROFS layer files are created correctly
@@ -921,8 +933,15 @@ test_vmdk_layer_order() {
     done < "$vmdk_file"
 
     if [ ${#vmdk_digests[@]} -eq 0 ]; then
-        log_warn "No digest-named layers found in VMDK (may have fallback naming)"
-        return 0
+        log_error "No digest-named layers found in VMDK"
+        return 1
+    fi
+
+    # Verify we have multiple layers (the whole point of this test)
+    if [ ${#vmdk_digests[@]} -lt 2 ]; then
+        log_error "Expected multiple layers in VMDK, but found only ${#vmdk_digests[@]}"
+        log_error "Make sure MULTI_LAYER_IMAGE has multiple layers (busybox/alpine only have 1)"
+        return 1
     fi
 
     log_info "Found ${#vmdk_digests[@]} layers in VMDK:"
