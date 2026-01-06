@@ -251,9 +251,10 @@ func TestMountFsMetaReturnsFormatErofs(t *testing.T) {
 	}
 
 	// Create required files for mountFsMeta to succeed
+	// Use digest-based naming for layer file (as the differ now creates)
 	vmdkPath := filepath.Join(snapshotDir, "merged.vmdk")
 	fsmetaPath := filepath.Join(snapshotDir, "fsmeta.erofs")
-	layerPath := filepath.Join(snapshotDir, "layer.erofs")
+	layerPath := filepath.Join(snapshotDir, "sha256-a3ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4.erofs")
 
 	for _, path := range []string{vmdkPath, fsmetaPath, layerPath} {
 		if err := os.WriteFile(path, []byte("fake"), 0644); err != nil {
