@@ -153,6 +153,7 @@ jobs:
             --tmpfs /run:exec \
             --tmpfs /var/lib/containerd-test:exec \
             --tmpfs /var/lib/nexus-erofs-snapshotter:exec \
+            --entrypoint /workspace/scripts/integration-test.sh \
             nexus-erofs-integration:local
 
       - name: Upload logs on failure
