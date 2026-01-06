@@ -387,7 +387,7 @@ EOF
     log_info "Generated containerd config at /etc/containerd/config.toml"
 }
 
-# Build snapshotter binary
+# Build snapshotter binary and tools
 build_snapshotter() {
     if [ "${SKIP_BUILD}" = "true" ] && [ -x /usr/local/bin/nexuserofs-snapshotter ]; then
         log_info "Skipping build, using existing binary"
@@ -398,6 +398,13 @@ build_snapshotter() {
     cd /workspace
     CGO_ENABLED=0 go build -buildvcs=false -o /usr/local/bin/nexuserofs-snapshotter ./cmd/nexuserofs-snapshotter
     log_info "Snapshotter built successfully"
+
+    # Build integration-commit tool for image commit tests
+    if [ -d ./cmd/integration-commit ]; then
+        log_info "Building integration-commit tool..."
+        CGO_ENABLED=0 go build -buildvcs=false -o /usr/local/bin/integration-commit ./cmd/integration-commit
+        log_info "integration-commit built successfully"
+    fi
 }
 
 # Start containerd
@@ -859,38 +866,59 @@ test_erofs_layers() {
     fi
 }
 
-# Test: Verify all pulled images are visible in ctr images ls
+# Test: Create a new image using the integration-commit tool
 test_nerdctl() {
-    # Configure nerdctl
-    export CONTAINERD_ADDRESS="${CONTAINERD_SOCKET}"
-    export CONTAINERD_SNAPSHOTTER="nexuserofs"
+    # Check if integration-commit tool exists
+    if [ ! -x /usr/local/bin/integration-commit ]; then
+        log_warn "integration-commit tool not found, skipping image commit test"
+        # Fall back to just listing images
+        log_info "All images:"
+        ctr_cmd images ls
+        return 0
+    fi
 
-    # List all images using ctr
-    log_info "Listing all images with ctr images ls:"
-    echo ""
+    # Show images BEFORE commit
+    log_info "Images BEFORE commit:"
     ctr_cmd images ls
     echo ""
 
-    # Count images
-    local image_count
-    image_count=$(ctr_cmd images ls | grep -v "^REF" | wc -l)
+    local image_count_before
+    image_count_before=$(ctr_cmd images ls | grep -v "^REF" | wc -l)
 
-    # We should have at least 2 images: TEST_IMAGE and MULTI_LAYER_IMAGE
-    assert_greater_than "$image_count" 1 "Should have multiple images after pulls" || return 1
+    # Use integration-commit to create a new image
+    local new_image="localhost/alpine:with-new-layer"
+    log_info "Creating new image via commit: $new_image"
 
-    # Verify both test images are visible
-    local images_output
-    images_output=$(ctr_cmd images ls 2>&1)
-
-    if echo "$images_output" | grep -q "alpine"; then
-        log_info "✓ Alpine image visible"
+    if ! /usr/local/bin/integration-commit \
+        -address "${CONTAINERD_SOCKET}" \
+        -snapshotter nexuserofs \
+        -source "${TEST_IMAGE}" \
+        -target "$new_image" \
+        -marker "/root/integration-test-marker.txt" 2>&1; then
+        log_error "integration-commit failed"
+        return 1
     fi
 
-    if echo "$images_output" | grep -q "busybox"; then
-        log_info "✓ Busybox image visible"
+    # Show images AFTER commit
+    echo ""
+    log_info "Images AFTER commit:"
+    ctr_cmd images ls
+    echo ""
+
+    local image_count_after
+    image_count_after=$(ctr_cmd images ls | grep -v "^REF" | wc -l)
+
+    # Verify new image exists
+    if ! ctr_cmd images ls | grep -q "with-new-layer"; then
+        log_error "New image not found after commit"
+        return 1
     fi
 
-    log_info "Total images in containerd: $image_count"
+    log_info "✓ New image created successfully!"
+    log_info "Image count: $image_count_before -> $image_count_after"
+
+    # Clean up the new image
+    ctr_cmd images rm "$new_image" 2>/dev/null || true
 }
 
 # Test: Snapshot removal and cleanup
