@@ -4,9 +4,12 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/opencontainers/go-digest"
+
+	"github.com/aledbf/nexus-erofs/internal/erofs"
 )
 
 // VMDKLayerInfo contains information about a layer extracted from a VMDK descriptor.
@@ -14,8 +17,8 @@ type VMDKLayerInfo struct {
 	// Path is the full path to the EROFS layer file
 	Path string
 	// Digest is the layer digest extracted from the filename (if digest-based naming)
-	// Format: sha256:abc123... (empty if not a digest-based filename)
-	Digest string
+	// Empty if not a digest-based filename (e.g., fsmeta.erofs)
+	Digest digest.Digest
 	// Sectors is the size in 512-byte sectors
 	Sectors int64
 }
@@ -24,13 +27,16 @@ type VMDKLayerInfo struct {
 // Format: RW <sectors> FLAT "<path>" <offset>
 var layerPathRegex = regexp.MustCompile(`^RW\s+(\d+)\s+FLAT\s+"([^"]+)"\s+\d+`)
 
-// digestFilenameRegex extracts the digest from digest-based filenames.
-// Format: sha256-<hex>.erofs
-var digestFilenameRegex = regexp.MustCompile(`^sha256-([a-f0-9]+)\.erofs$`)
-
 // ParseVMDK reads a VMDK descriptor file and extracts layer information.
 // Returns layers in the order they appear in the VMDK (fsmeta first, then layers
 // from newest/top to oldest/bottom).
+//
+// VMDK layer order is the REVERSE of OCI manifest order:
+// - OCI manifest: [layer_0, layer_1, ..., layer_n] (bottom to top, base first)
+// - VMDK:         [fsmeta, layer_n, ..., layer_1, layer_0] (top to bottom, newest first)
+//
+// See: https://github.com/opencontainers/image-spec/blob/main/manifest.md
+// See: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc
 func ParseVMDK(vmdkPath string) ([]VMDKLayerInfo, error) {
 	f, err := os.Open(vmdkPath)
 	if err != nil {
@@ -59,12 +65,7 @@ func ParseVMDK(vmdkPath string) ([]VMDKLayerInfo, error) {
 		layer := VMDKLayerInfo{
 			Path:    path,
 			Sectors: sectors,
-		}
-
-		// Extract digest from filename if it's a digest-based name
-		filename := filepath.Base(path)
-		if digestMatches := digestFilenameRegex.FindStringSubmatch(filename); digestMatches != nil {
-			layer.Digest = "sha256:" + digestMatches[1]
+			Digest:  erofs.DigestFromLayerBlobPath(path),
 		}
 
 		layers = append(layers, layer)
@@ -80,15 +81,11 @@ func ParseVMDK(vmdkPath string) ([]VMDKLayerInfo, error) {
 // ExtractLayerDigests extracts just the digests from VMDK layers, filtering out
 // non-layer entries (like fsmeta.erofs) and returning digests in VMDK order
 // (newest/top layer first).
-func ExtractLayerDigests(layers []VMDKLayerInfo) []string {
-	var digests []string
+func ExtractLayerDigests(layers []VMDKLayerInfo) []digest.Digest {
+	var digests []digest.Digest
 	for _, layer := range layers {
 		// Skip fsmeta entries and non-digest-based files
 		if layer.Digest == "" {
-			continue
-		}
-		// Skip fsmeta (it doesn't have a layer digest)
-		if strings.HasSuffix(layer.Path, "fsmeta.erofs") {
 			continue
 		}
 		digests = append(digests, layer.Digest)
@@ -96,12 +93,46 @@ func ExtractLayerDigests(layers []VMDKLayerInfo) []string {
 	return digests
 }
 
-// ReverseDigests reverses a slice of digests (useful for comparing VMDK order
-// with manifest order, since they use opposite conventions).
-func ReverseDigests(digests []string) []string {
-	reversed := make([]string, len(digests))
+// ReverseDigests reverses a slice of digests.
+// Use this to convert between VMDK order (top-to-bottom) and OCI manifest order (bottom-to-top).
+// See: https://github.com/opencontainers/image-spec/blob/main/manifest.md
+func ReverseDigests(digests []digest.Digest) []digest.Digest {
+	reversed := make([]digest.Digest, len(digests))
 	for i, d := range digests {
 		reversed[len(digests)-1-i] = d
 	}
 	return reversed
+}
+
+// ParseLayerManifest reads a layer manifest file and returns the digests in VMDK order.
+// The manifest file contains one digest per line (sha256:hex...), newest layer first.
+// This is the authoritative source for verifying VMDK layer order.
+func ParseLayerManifest(manifestPath string) ([]digest.Digest, error) {
+	f, err := os.Open(manifestPath)
+	if err != nil {
+		return nil, fmt.Errorf("open manifest: %w", err)
+	}
+	defer f.Close()
+
+	var digests []digest.Digest
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		d, err := digest.Parse(line)
+		if err != nil {
+			// Skip invalid digest lines
+			continue
+		}
+		digests = append(digests, d)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan manifest: %w", err)
+	}
+
+	return digests, nil
 }

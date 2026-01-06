@@ -1,6 +1,10 @@
 #!/bin/bash
 # Run integration tests in Docker with containerd and nexus-erofs snapshotter
 #
+# This script builds Go binaries locally and mounts them into the container,
+# avoiding the need to rebuild the Docker image for code changes. The Docker
+# image only contains runtime dependencies (erofs-utils, containerd, etc.).
+#
 # Usage:
 #   ./scripts/run-integration-tests.sh [options]
 #
@@ -15,9 +19,13 @@
 #
 # Examples:
 #   ./scripts/run-integration-tests.sh                    # Run using ghcr.io image
-#   ./scripts/run-integration-tests.sh --build            # Build locally and run
+#   ./scripts/run-integration-tests.sh --build            # Build Docker image and run
 #   ./scripts/run-integration-tests.sh --shell            # Interactive debugging
 #   ./scripts/run-integration-tests.sh --test commit      # Run only commit test
+#
+# What gets mounted at runtime (no Docker rebuild needed):
+#   - Go binaries (nexus-erofs-snapshotter, integration-commit) -> /usr/local/bin/
+#   - scripts/integration-test.sh -> /workspace/scripts/
 #
 # AI Assistant Usage (Claude Code):
 #   - Run all tests:     ./scripts/run-integration-tests.sh
@@ -67,7 +75,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            head -24 "$0" | tail -n +2 | sed 's/^# //' | sed 's/^#//'
+            head -32 "$0" | tail -n +2 | sed 's/^# //' | sed 's/^#//'
             exit 0
             ;;
         *)
@@ -129,6 +137,23 @@ GO_BUILD_CACHE="${GOCACHE:-$HOME/.cache/go-build}"
 # Ensure cache directories exist
 mkdir -p "${GO_MOD_CACHE}" "${GO_BUILD_CACHE}"
 
+# Build directory for binaries
+BUILD_DIR="${ROOT_DIR}/bin"
+mkdir -p "${BUILD_DIR}"
+
+# Build Go binaries locally (for faster iteration - no Docker rebuild needed)
+echo "==> Building Go binaries..."
+(
+    cd "${ROOT_DIR}"
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" \
+        -o "${BUILD_DIR}/nexus-erofs-snapshotter" \
+        ./cmd/nexus-erofs-snapshotter
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" \
+        -o "${BUILD_DIR}/integration-commit" \
+        ./cmd/integration-commit
+)
+echo "    Built: nexus-erofs-snapshotter, integration-commit"
+
 # Docker run options
 DOCKER_OPTS=(
     --privileged
@@ -138,6 +163,9 @@ DOCKER_OPTS=(
     -v "${ROOT_DIR}:/workspace"
     -v "${GO_MOD_CACHE}:/go/pkg/mod"
     -v "${GO_BUILD_CACHE}:/root/.cache/go-build"
+    # Mount built binaries directly into PATH
+    -v "${BUILD_DIR}/nexus-erofs-snapshotter:/usr/local/bin/nexus-erofs-snapshotter"
+    -v "${BUILD_DIR}/integration-commit:/usr/local/bin/integration-commit"
     -w /workspace
     --tmpfs /tmp:exec
     --tmpfs /run:exec

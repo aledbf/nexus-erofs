@@ -317,6 +317,47 @@ func TestLayerBlobFilename(t *testing.T) {
 	}
 }
 
+func TestDigestFromLayerBlobPath(t *testing.T) {
+	tests := []struct {
+		path string
+		want string // empty string means no digest expected
+	}{
+		{
+			path: "/var/lib/snapshotter/snapshots/5/sha256-a3ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4.erofs",
+			want: "sha256:a3ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4",
+		},
+		{
+			path: "sha256-1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef.erofs",
+			want: "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+		},
+		{
+			path: "/snapshots/1/fsmeta.erofs",
+			want: "", // fsmeta has no digest
+		},
+		{
+			path: "/snapshots/1/snapshot-123.erofs",
+			want: "", // fallback naming has no digest
+		},
+		{
+			path: "sha256-short.erofs",
+			want: "", // invalid digest (too short)
+		},
+		{
+			path: "/some/path/file.txt",
+			want: "", // wrong extension
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.path, func(t *testing.T) {
+			got := DigestFromLayerBlobPath(tc.path)
+			if got.String() != tc.want && (tc.want != "" || got != "") {
+				t.Errorf("DigestFromLayerBlobPath(%q) = %q, want %q", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildTarErofsArgs(t *testing.T) {
 	tests := []struct {
 		name          string

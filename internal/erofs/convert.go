@@ -29,6 +29,7 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
+	"github.com/opencontainers/go-digest"
 
 	"github.com/aledbf/nexus-erofs/internal/stringutil"
 )
@@ -452,9 +453,35 @@ func CanMergeFsmeta(layerPaths []string) bool {
 // LayerBlobFilename returns the filename for an EROFS layer blob based on its digest.
 // The digest format "sha256:abc123..." is converted to "sha256-abc123....erofs".
 // This allows easy correlation between layer files and container registry manifests.
-func LayerBlobFilename(digest string) string {
+func LayerBlobFilename(d string) string {
 	// Replace ":" with "-" to make it filesystem-safe
 	// sha256:abc123... -> sha256-abc123....erofs
-	safeName := strings.ReplaceAll(digest, ":", "-")
+	safeName := strings.ReplaceAll(d, ":", "-")
 	return safeName + layerBlobExtension
+}
+
+// DigestFromLayerBlobPath extracts the digest from an EROFS layer blob path.
+// The filename format "sha256-abc123....erofs" is converted back to "sha256:abc123...".
+// Returns empty digest if the filename doesn't match the expected format.
+func DigestFromLayerBlobPath(path string) digest.Digest {
+	filename := filepath.Base(path)
+
+	// Must have .erofs extension
+	if !strings.HasSuffix(filename, layerBlobExtension) {
+		return ""
+	}
+
+	// Remove extension: sha256-abc123.erofs -> sha256-abc123
+	name := strings.TrimSuffix(filename, layerBlobExtension)
+
+	// Convert back to digest format: sha256-abc123 -> sha256:abc123
+	digestStr := strings.Replace(name, "-", ":", 1)
+
+	// Validate using the proper digest parser
+	d, err := digest.Parse(digestStr)
+	if err != nil {
+		return ""
+	}
+
+	return d
 }

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/opencontainers/go-digest"
 )
 
 func TestParseVMDK(t *testing.T) {
@@ -60,7 +62,7 @@ ddb.adapterType = "ide"
 	}
 
 	// Verify second layer has correct digest
-	expectedDigest := "sha256:a3ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4"
+	expectedDigest := digest.Digest("sha256:a3ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4")
 	if layers[1].Digest != expectedDigest {
 		t.Errorf("second layer digest = %q, want %q", layers[1].Digest, expectedDigest)
 	}
@@ -72,24 +74,37 @@ ddb.adapterType = "ide"
 }
 
 func TestExtractLayerDigests(t *testing.T) {
+	// Use valid 64-char hex digests
 	layers := []VMDKLayerInfo{
 		{Path: "/snapshots/5/fsmeta.erofs", Digest: "", Sectors: 2464},
-		{Path: "/snapshots/5/sha256-aaa.erofs", Digest: "sha256:aaa", Sectors: 48},
-		{Path: "/snapshots/4/sha256-bbb.erofs", Digest: "sha256:bbb", Sectors: 1000},
-		{Path: "/snapshots/3/sha256-ccc.erofs", Digest: "sha256:ccc", Sectors: 500},
+		{Path: "/snapshots/5/sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.erofs", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Sectors: 48},
+		{Path: "/snapshots/4/sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.erofs", Digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Sectors: 1000},
+		{Path: "/snapshots/3/sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.erofs", Digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", Sectors: 500},
 	}
 
 	digests := ExtractLayerDigests(layers)
 
-	expected := []string{"sha256:aaa", "sha256:bbb", "sha256:ccc"}
+	expected := []digest.Digest{
+		"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+	}
 	if !reflect.DeepEqual(digests, expected) {
 		t.Errorf("ExtractLayerDigests = %v, want %v", digests, expected)
 	}
 }
 
 func TestReverseDigests(t *testing.T) {
-	input := []string{"sha256:aaa", "sha256:bbb", "sha256:ccc"}
-	expected := []string{"sha256:ccc", "sha256:bbb", "sha256:aaa"}
+	input := []digest.Digest{
+		"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+	}
+	expected := []digest.Digest{
+		"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
 
 	result := ReverseDigests(input)
 	if !reflect.DeepEqual(result, expected) {
@@ -181,10 +196,10 @@ ddb.virtualHWVersion = "4"
 	digests := ExtractLayerDigests(layers)
 
 	// VMDK order should be: layer3 (newest), layer2, layer1 (oldest)
-	expectedVMDKOrder := []string{
-		"sha256:" + layer3Digest,
-		"sha256:" + layer2Digest,
-		"sha256:" + layer1Digest,
+	expectedVMDKOrder := []digest.Digest{
+		digest.Digest("sha256:" + layer3Digest),
+		digest.Digest("sha256:" + layer2Digest),
+		digest.Digest("sha256:" + layer1Digest),
 	}
 
 	if !reflect.DeepEqual(digests, expectedVMDKOrder) {
@@ -193,10 +208,10 @@ ddb.virtualHWVersion = "4"
 
 	// When comparing with manifest, we need to reverse the VMDK order
 	// Manifest order: layer1 (oldest), layer2, layer3 (newest)
-	manifestOrder := []string{
-		"sha256:" + layer1Digest,
-		"sha256:" + layer2Digest,
-		"sha256:" + layer3Digest,
+	manifestOrder := []digest.Digest{
+		digest.Digest("sha256:" + layer1Digest),
+		digest.Digest("sha256:" + layer2Digest),
+		digest.Digest("sha256:" + layer3Digest),
 	}
 
 	reversedVMDK := ReverseDigests(digests)

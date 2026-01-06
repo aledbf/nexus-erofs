@@ -2,42 +2,19 @@
 # Build: docker build -t nexus-erofs-integration -f Dockerfile.integration .
 # Run:   docker run --privileged --rm nexus-erofs-integration
 #
-# Multi-stage build for smaller image size:
-# - Stage 1 (go-builder): Builds Go binaries
-# - Stage 2 (erofs-builder): Builds erofs-utils from source
-# - Stage 3 (runtime): Minimal Ubuntu with only runtime dependencies
+# This is a base image with runtime dependencies only.
+# Go binaries (nexus-erofs-snapshotter, integration-commit) are built on the host
+# and mounted at runtime for faster iteration.
+#
+# Multi-stage build:
+# - Stage 1 (erofs-builder): Builds erofs-utils from source
+# - Stage 2 (runtime): Minimal Ubuntu with only runtime dependencies
 
-ARG GO_VERSION=1.25
 ARG NERDCTL_VERSION=2.2.1
 ARG UBUNTU_VERSION=25.10
 
 # =============================================================================
-# Stage 1: Build Go binaries
-# =============================================================================
-FROM golang:${GO_VERSION} AS go-builder
-
-WORKDIR /build
-
-# Copy go.mod and go.sum first for better layer caching
-COPY go.mod go.sum ./
-RUN go mod download
-
-# Copy source code
-COPY . .
-
-# Build the snapshotter and integration-commit tool
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false \
-    -ldflags="-s -w" \
-    -o /out/nexus-erofs-snapshotter \
-    ./cmd/nexus-erofs-snapshotter
-
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false \
-    -ldflags="-s -w" \
-    -o /out/integration-commit \
-    ./cmd/integration-commit
-
-# =============================================================================
-# Stage 2: Build erofs-utils
+# Stage 1: Build erofs-utils
 # =============================================================================
 FROM ubuntu:${UBUNTU_VERSION} AS erofs-builder
 
@@ -62,7 +39,7 @@ COPY scripts/build-erofs-utils.sh /tmp/build-erofs-utils.sh
 RUN /tmp/build-erofs-utils.sh /usr/local
 
 # =============================================================================
-# Stage 3: Runtime image
+# Stage 2: Runtime image
 # =============================================================================
 FROM ubuntu:${UBUNTU_VERSION}
 
@@ -87,6 +64,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libuuid1 \
     xxd \
     isal \
+    jq \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy erofs-utils binaries from builder
@@ -97,9 +75,8 @@ COPY --from=erofs-builder /usr/local/bin/dump.erofs /usr/local/bin/
 # Verify erofs-utils installation
 RUN mkfs.erofs --version
 
-# Copy Go binaries from builder
-COPY --from=go-builder /out/nexus-erofs-snapshotter /usr/local/bin/
-COPY --from=go-builder /out/integration-commit /usr/local/bin/
+# Note: Go binaries (nexus-erofs-snapshotter, integration-commit) are built on
+# the host and mounted at runtime. See run-integration-tests.sh for details.
 
 # Install nerdctl (containerd + ctr + nerdctl bundle)
 ARG NERDCTL_VERSION
@@ -125,9 +102,12 @@ RUN mkdir -p \
 
 WORKDIR /workspace
 
-# Copy integration test script
-COPY scripts/integration-test.sh /usr/local/bin/integration-test.sh
-RUN chmod +x /usr/local/bin/integration-test.sh
+# Note: Integration test script is mounted at runtime from scripts/ directory
+# for faster iteration. The entrypoint script is a thin wrapper that calls it.
 
-# Default entrypoint runs integration tests
-ENTRYPOINT ["/usr/local/bin/integration-test.sh"]
+# Create entrypoint wrapper that runs the mounted script
+RUN printf '#!/bin/bash\nexec /workspace/scripts/integration-test.sh "$@"\n' > /usr/local/bin/entrypoint.sh \
+    && chmod +x /usr/local/bin/entrypoint.sh
+
+# Default entrypoint runs integration tests via mounted script
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
