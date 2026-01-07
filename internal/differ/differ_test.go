@@ -57,16 +57,11 @@ func TestNewErofsDiffer(t *testing.T) {
 func TestDefaultMkfsOpts(t *testing.T) {
 	opts := defaultMkfsOpts()
 
-	// Should always include LZ4HC compression
-	foundCompression := false
+	// No compression should be used (compressed layers are incompatible with fsmeta merge)
 	for _, opt := range opts {
-		if strings.HasPrefix(opt, "-zlz4hc") {
-			foundCompression = true
-			break
+		if strings.HasPrefix(opt, "-z") {
+			t.Errorf("compression options are incompatible with fsmeta merge, got: %v", opts)
 		}
-	}
-	if !foundCompression {
-		t.Errorf("expected -zlz4hc compression option, got: %v", opts)
 	}
 
 	// On darwin, should have -b4096 as first option
@@ -76,12 +71,10 @@ func TestDefaultMkfsOpts(t *testing.T) {
 		}
 	}
 
-	// On linux, should NOT have -b option
+	// On linux, should return nil (no special options needed)
 	if runtime.GOOS == "linux" {
-		for _, opt := range opts {
-			if strings.HasPrefix(opt, "-b") {
-				t.Errorf("unexpected -b option on linux: %v", opts)
-			}
+		if opts != nil {
+			t.Errorf("expected nil options on linux, got: %v", opts)
 		}
 	}
 }

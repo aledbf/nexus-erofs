@@ -375,15 +375,15 @@ version = 2
 | `--set-immutable` | `true` | Set immutable flag on committed layers |
 | `--version` | | Show version information |
 
-### Layer Conversion and Compression
+### Layer Conversion
 
-Layers are created using full conversion mode (`--tar=f`) with LZ4HC compression at level 9 (`-zlz4hc,9`). This configuration provides:
+Layers are created using full conversion mode (`--tar=f`) **without compression**. This is required because:
 
-- **Good compression ratio**: LZ4HC achieves reasonable size reduction
-- **Fast decompression**: LZ4 has the lowest decompression latency among supported compressors
-- **Optimal random read performance**: Default 4KB physical clusters are preserved (no `-C` flag)
+- **fsmeta compatibility**: Compressed EROFS layers use "datalayout 3" which is incompatible with fsmeta merge
+- **VMDK generation**: This snapshotter always generates VMDK descriptors for multi-layer images, which requires fsmeta merge
+- **Block size**: Default 4KB blocks ensure compatibility and optimal random read performance
 
-This is a deliberate trade-off: we prioritize runtime I/O performance over maximum compression ratio, which benefits container startup time in VMs. The 4096-byte block size also ensures compatibility with fsmeta merge for multi-layer images.
+Compression cannot be enabled because it would break multi-layer image support.
 
 ## License
 

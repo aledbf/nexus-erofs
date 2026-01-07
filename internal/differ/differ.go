@@ -207,20 +207,17 @@ func (rc *readCounter) Read(p []byte) (n int, err error) {
 
 // defaultMkfsOpts returns the hardcoded mkfs.erofs options optimized for VM use.
 //
-// Compression: LZ4HC level 9 provides good compression with fast decompression.
-// Block size: Default 4KB clusters are kept for optimal random read performance.
-// This is a deliberate trade-off: we prioritize runtime I/O performance over
-// maximum compression ratio, which benefits container startup time in VMs.
+// IMPORTANT: No compression is used because compressed layers (datalayout 3)
+// are incompatible with fsmeta merge. Since this snapshotter always generates
+// VMDK descriptors for multi-layer images, we must use uncompressed layers.
 //
-// Reference: https://erofs.docs.kernel.org/en/latest/faq.html
+// Block size: Default 4KB blocks are used for optimal random read performance.
 func defaultMkfsOpts() []string {
-	opts := []string{"-zlz4hc,9"}
-
 	// On macOS, explicitly set block size to 4096 to prevent
 	// platform-specific defaults that could cause issues.
 	if runtime.GOOS == "darwin" {
-		opts = append([]string{"-b4096"}, opts...)
+		return []string{"-b4096"}
 	}
 
-	return opts
+	return nil
 }
