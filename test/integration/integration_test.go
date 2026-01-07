@@ -41,7 +41,6 @@ import (
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/testutil"
-	"github.com/opencontainers/go-digest"
 )
 
 // Test configuration constants.
@@ -71,9 +70,12 @@ const (
 	fsmetaFile = "fsmeta.erofs"
 )
 
-// ============================================================================
-// Test Assertions and Verification
-// ============================================================================
+// Package-level compiled regexes for performance.
+var (
+	extentPattern     = regexp.MustCompile(`RW\s+\d+\s+FLAT\s+"([^"]+)"`)
+	vmdkExtentPattern = regexp.MustCompile(`RW\s+\d+\s+FLAT\s+"[^"]+"\s+\d+`)
+	digestPattern     = regexp.MustCompile(`sha256-([a-f0-9]{64})\.erofs`)
+)
 
 // Assertions provides structured verification methods for integration tests.
 type Assertions struct {
@@ -100,7 +102,7 @@ func (a *Assertions) SnapshotExists(ctx context.Context, key string, kind snapsh
 		a.t.Errorf("snapshot %q: expected kind %v, got %v", key, kind, info.Kind)
 	}
 
-	a.t.Logf("✓ snapshot %q exists (kind=%v, parent=%q)", key, info.Kind, info.Parent)
+	a.t.Logf("verified: snapshot %q exists (kind=%v, parent=%q)", key, info.Kind, info.Parent)
 	return info
 }
 
@@ -114,7 +116,7 @@ func (a *Assertions) SnapshotRemoved(ctx context.Context, key string) {
 		a.t.Fatalf("snapshot %q still exists (expected removed)", key)
 	}
 
-	a.t.Logf("✓ snapshot %q removed", key)
+	a.t.Logf("verified: snapshot %q removed", key)
 }
 
 // FileExists verifies a file exists and returns its info.
@@ -126,7 +128,7 @@ func (a *Assertions) FileExists(path string) os.FileInfo {
 		a.t.Fatalf("file %q does not exist: %v", path, err)
 	}
 
-	a.t.Logf("✓ file exists: %s (%d bytes)", path, info.Size())
+	a.t.Logf("verified: file exists %s (%d bytes)", path, info.Size())
 	return info
 }
 
@@ -139,7 +141,7 @@ func (a *Assertions) FileNotExists(path string) {
 		a.t.Fatalf("file %q exists (expected not to exist)", path)
 	}
 
-	a.t.Logf("✓ file removed: %s", path)
+	a.t.Logf("verified: file removed %s", path)
 }
 
 // ErofsValid verifies an EROFS file has valid magic.
@@ -150,7 +152,7 @@ func (a *Assertions) ErofsValid(path string) {
 		a.t.Fatalf("invalid EROFS file %q: %v", path, err)
 	}
 
-	a.t.Logf("✓ valid EROFS: %s", filepath.Base(path))
+	a.t.Logf("verified: valid EROFS %s", filepath.Base(path))
 }
 
 // MountsContain verifies mounts contain the expected type.
@@ -159,7 +161,7 @@ func (a *Assertions) MountsContain(mounts []mount.Mount, mountType string) mount
 
 	for _, m := range mounts {
 		if m.Type == mountType || strings.Contains(m.Type, mountType) {
-			a.t.Logf("✓ mount type %q found (source=%s)", m.Type, filepath.Base(m.Source))
+			a.t.Logf("verified: mount type %q found (source=%s)", m.Type, filepath.Base(m.Source))
 			return m
 		}
 	}
@@ -185,7 +187,7 @@ func (a *Assertions) SnapshotCount(ctx context.Context, op string, min int) int 
 		a.t.Fatalf("expected at least %d snapshots after %s, got %d", min, op, count)
 	}
 
-	a.t.Logf("✓ snapshot count after %s: %d", op, count)
+	a.t.Logf("verified: snapshot count after %s: %d", op, count)
 	return count
 }
 
@@ -214,7 +216,7 @@ func (a *Assertions) DirContains(dir, pattern string) []string {
 		a.t.Fatalf("no files matching %q in %s", pattern, dir)
 	}
 
-	a.t.Logf("✓ found %d files matching %q", len(matches), pattern)
+	a.t.Logf("verified: found %d files matching %q", len(matches), pattern)
 	return matches
 }
 
@@ -273,7 +275,7 @@ func (a *Assertions) FindCommittedSnapshot(ctx context.Context) string {
 		a.t.Fatal("no committed snapshot found")
 	}
 
-	a.t.Logf("✓ found committed snapshot: %s", parentKey)
+	a.t.Logf("found committed snapshot: %s", parentKey)
 	return parentKey
 }
 
@@ -297,12 +299,11 @@ func (a *Assertions) VMDKValid(path string) {
 	}
 
 	// Check extent format
-	extentPattern := regexp.MustCompile(`RW\s+\d+\s+FLAT\s+"[^"]+"\s+\d+`)
-	if !extentPattern.MatchString(content) {
+	if !vmdkExtentPattern.MatchString(content) {
 		a.t.Fatalf("VMDK %q has no valid extent definitions", path)
 	}
 
-	a.t.Logf("✓ valid VMDK: %s", filepath.Base(path))
+	a.t.Logf("verified: valid VMDK %s", filepath.Base(path))
 }
 
 // Environment manages the test environment including containerd and snapshotter.
@@ -322,6 +323,10 @@ type Environment struct {
 	// Process management
 	containerdPID  int
 	snapshotterPID int
+
+	// Log files (closed on Stop)
+	containerdLog  *os.File
+	snapshotterLog *os.File
 
 	// Client
 	client *client.Client
@@ -394,6 +399,16 @@ func (e *Environment) Stop() {
 
 	e.stopContainerd()
 	e.stopSnapshotter()
+
+	// Close log files
+	if e.containerdLog != nil {
+		e.containerdLog.Close()
+		e.containerdLog = nil
+	}
+	if e.snapshotterLog != nil {
+		e.snapshotterLog.Close()
+		e.snapshotterLog = nil
+	}
 }
 
 // Client returns the containerd client.
@@ -485,6 +500,7 @@ func (e *Environment) startSnapshotter() error {
 	}
 
 	e.snapshotterPID = cmd.Process.Pid
+	e.snapshotterLog = logFile
 	e.t.Logf("snapshotter started (PID: %d)", e.snapshotterPID)
 
 	// Wait for socket
@@ -519,6 +535,7 @@ func (e *Environment) startContainerd() error {
 	}
 
 	e.containerdPID = cmd.Process.Pid
+	e.containerdLog = logFile
 	e.t.Logf("containerd started (PID: %d)", e.containerdPID)
 
 	// Wait for socket
@@ -557,58 +574,42 @@ func (e *Environment) connect() error {
 	}
 }
 
-// stopContainerd stops the containerd process.
-func (e *Environment) stopContainerd() {
-	if e.containerdPID == 0 {
+// stopProcess gracefully stops a process by PID with a timeout.
+func stopProcess(pid *int, timeout time.Duration) {
+	if *pid == 0 {
 		return
 	}
 
-	proc, err := os.FindProcess(e.containerdPID)
+	proc, err := os.FindProcess(*pid)
 	if err != nil {
+		*pid = 0
 		return
 	}
 
 	_ = proc.Signal(syscall.SIGTERM)
 	done := make(chan struct{})
 	go func() {
-		proc.Wait()
+		_, _ = proc.Wait()
 		close(done)
 	}()
 
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(timeout):
 		_ = proc.Kill()
 	}
 
-	e.containerdPID = 0
+	*pid = 0
+}
+
+// stopContainerd stops the containerd process.
+func (e *Environment) stopContainerd() {
+	stopProcess(&e.containerdPID, 5*time.Second)
 }
 
 // stopSnapshotter stops the snapshotter process.
 func (e *Environment) stopSnapshotter() {
-	if e.snapshotterPID == 0 {
-		return
-	}
-
-	proc, err := os.FindProcess(e.snapshotterPID)
-	if err != nil {
-		return
-	}
-
-	_ = proc.Signal(syscall.SIGTERM)
-	done := make(chan struct{})
-	go func() {
-		proc.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		_ = proc.Kill()
-	}
-
-	e.snapshotterPID = 0
+	stopProcess(&e.snapshotterPID, 5*time.Second)
 }
 
 // dumpLogs prints the last N lines of a service log.
@@ -657,14 +658,22 @@ func findBinary(name string) (string, error) {
 
 // waitForSocket waits for a Unix socket to become available.
 func waitForSocket(path string, timeout time.Duration) error {
+	return waitFor(func() bool {
+		_, err := os.Stat(path)
+		return err == nil
+	}, timeout, fmt.Sprintf("socket not available: %s", path))
+}
+
+// waitFor polls a condition function until it returns true or timeout.
+func waitFor(condition func() bool, timeout time.Duration, errMsg string) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
+		if condition() {
 			return nil
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
-	return fmt.Errorf("socket not available: %s", path)
+	return errors.New(errMsg)
 }
 
 // pullImage pulls an image with retry logic.
@@ -689,10 +698,6 @@ func pullImage(ctx context.Context, c *client.Client, ref string) error {
 	}
 	return fmt.Errorf("pull image after 3 attempts: %w", lastErr)
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 // TestIntegration runs the integration test suite.
 func TestIntegration(t *testing.T) {
@@ -840,7 +845,7 @@ func testPullImage(t *testing.T, env *Environment) {
 	if err != nil {
 		t.Fatalf("get image: %v", err)
 	}
-	t.Logf("✓ image pulled: %s", img.Name())
+	t.Logf("image pulled: %s", img.Name())
 
 	t.Log("--- Step 3: Verify snapshots created ---")
 	count := assert.SnapshotCount(ctx, "pull", 1)
@@ -852,7 +857,7 @@ func testPullImage(t *testing.T, env *Environment) {
 		assert.ErofsValid(erofsFiles[0])
 	}
 
-	t.Logf("✓ pull complete: %d snapshots, %d EROFS files", count, len(erofsFiles))
+	t.Logf("pull complete: %d snapshots, %d EROFS files", count, len(erofsFiles))
 }
 
 // testPrepareSnapshot verifies snapshot preparation from a committed parent.
@@ -887,7 +892,7 @@ func testPrepareSnapshot(t *testing.T, env *Environment) {
 	t.Log("--- Step 4: Verify snapshot state ---")
 	assert.SnapshotExists(ctx, snapKey, snapshots.KindActive)
 
-	t.Logf("✓ prepare complete: snapshot=%s mounts=%d", snapKey, len(mounts))
+	t.Logf("prepare complete: snapshot=%s mounts=%d", snapKey, len(mounts))
 }
 
 // testViewSnapshot verifies view snapshot creation and mount info.
@@ -922,7 +927,7 @@ func testViewSnapshot(t *testing.T, env *Environment) {
 	t.Log("--- Step 4: Verify snapshot state ---")
 	assert.SnapshotExists(ctx, viewKey, snapshots.KindView)
 
-	t.Logf("✓ view complete: snapshot=%s mounts=%d", viewKey, len(mounts))
+	t.Logf("view complete: snapshot=%s mounts=%d", viewKey, len(mounts))
 }
 
 // testErofsLayers verifies EROFS layer files are created correctly.
@@ -966,7 +971,7 @@ func testErofsLayers(t *testing.T, env *Environment) {
 		assert.DumpFiles(snapshotsDir)
 		t.Fatal("no EROFS files found")
 	}
-	t.Logf("✓ %d total EROFS files found", totalErofs)
+	t.Logf("%d total EROFS files found", totalErofs)
 
 	t.Log("--- Step 3: Validate EROFS layer magic ---")
 
@@ -974,9 +979,9 @@ func testErofsLayers(t *testing.T, env *Environment) {
 	var validCount int
 	for _, path := range layerFiles {
 		if err := verifyErofsMagic(path); err != nil {
-			t.Logf("  ✗ %s: %v", filepath.Base(path), err)
+			t.Logf("  FAIL %s: %v", filepath.Base(path), err)
 		} else {
-			t.Logf("  ✓ %s: valid EROFS magic", filepath.Base(path))
+			t.Logf("  OK %s: valid EROFS magic", filepath.Base(path))
 			validCount++
 		}
 	}
@@ -984,23 +989,23 @@ func testErofsLayers(t *testing.T, env *Environment) {
 	// Also check other erofs files (might be commit results)
 	for _, path := range otherErofs {
 		if err := verifyErofsMagic(path); err != nil {
-			t.Logf("  ✗ %s: %v", filepath.Base(path), err)
+			t.Logf("  FAIL %s: %v", filepath.Base(path), err)
 		} else {
-			t.Logf("  ✓ %s: valid EROFS magic", filepath.Base(path))
+			t.Logf("  OK %s: valid EROFS magic", filepath.Base(path))
 			validCount++
 		}
 	}
 
 	// fsmeta files are metadata-only and don't have standard magic
 	for _, path := range fsmetaFiles {
-		t.Logf("  ℹ %s: fsmeta (multi-device metadata)", filepath.Base(path))
+		t.Logf("  INFO %s: fsmeta (multi-device metadata)", filepath.Base(path))
 	}
 
 	if validCount == 0 && len(fsmetaFiles) == 0 {
 		t.Fatal("no valid EROFS files found")
 	}
 
-	t.Logf("✓ EROFS validation complete: %d valid layers, %d fsmeta files", validCount, len(fsmetaFiles))
+	t.Logf("EROFS validation complete: %d valid layers, %d fsmeta files", validCount, len(fsmetaFiles))
 }
 
 // EROFS superblock magic number.
@@ -1034,59 +1039,32 @@ func verifyErofsMagic(path string) error {
 func testRwlayerCreation(t *testing.T, env *Environment) {
 	ctx := env.Context()
 	ss := env.SnapshotService()
+	assert := NewAssertions(t, env)
 
-	// Find a committed snapshot
-	var parentKey string
-	if err := ss.Walk(ctx, func(_ context.Context, info snapshots.Info) error {
-		if info.Kind == snapshots.KindCommitted && parentKey == "" {
-			parentKey = info.Name
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("walk snapshots: %v", err)
-	}
+	parentKey := assert.FindCommittedSnapshot(ctx)
 
-	// Create active snapshot
 	snapKey := fmt.Sprintf("test-rwlayer-%d", time.Now().UnixNano())
 	_, err := ss.Prepare(ctx, snapKey, parentKey)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
 	t.Cleanup(func() {
-		ss.Remove(ctx, snapKey)
+		ss.Remove(ctx, snapKey) //nolint:errcheck
 	})
 
-	// Look for rwlayer.img
+	// Verify rwlayer.img was created
 	snapshotsDir := filepath.Join(env.SnapshotterRoot(), "snapshots")
-	var found bool
-	filepath.Walk(snapshotsDir, func(path string, info os.FileInfo, err error) error {
-		if err == nil && filepath.Base(path) == "rwlayer.img" {
-			found = true
-			t.Logf("found rwlayer.img: %s (%d bytes)", path, info.Size())
-		}
-		return nil
-	})
-
-	if !found {
-		t.Error("no rwlayer.img found after prepare")
-	}
+	rwlayers := assert.DirContains(snapshotsDir, "rwlayer.img")
+	t.Logf("found %d rwlayer.img files", len(rwlayers))
 }
 
 // testCommit verifies snapshot commit creates EROFS layers.
 func testCommit(t *testing.T, env *Environment) {
 	ctx := env.Context()
 	ss := env.SnapshotService()
+	assert := NewAssertions(t, env)
 
-	// Find a committed snapshot
-	var parentKey string
-	if err := ss.Walk(ctx, func(_ context.Context, info snapshots.Info) error {
-		if info.Kind == snapshots.KindCommitted && parentKey == "" {
-			parentKey = info.Name
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("walk snapshots: %v", err)
-	}
+	parentKey := assert.FindCommittedSnapshot(ctx)
 
 	// Create an extract snapshot (triggers host mounting)
 	ts := time.Now().UnixNano()
@@ -1102,18 +1080,11 @@ func testCommit(t *testing.T, env *Environment) {
 		t.Fatalf("commit: %v", err)
 	}
 	t.Cleanup(func() {
-		ss.Remove(ctx, commitKey)
+		ss.Remove(ctx, commitKey) //nolint:errcheck
 	})
 
 	// Verify committed snapshot exists
-	info, err := ss.Stat(ctx, commitKey)
-	if err != nil {
-		t.Fatalf("stat committed: %v", err)
-	}
-
-	if info.Kind != snapshots.KindCommitted {
-		t.Errorf("expected KindCommitted, got %v", info.Kind)
-	}
+	assert.SnapshotExists(ctx, commitKey, snapshots.KindCommitted)
 	t.Logf("snapshot committed: %s", commitKey)
 }
 
@@ -1133,7 +1104,7 @@ func testSnapshotCleanup(t *testing.T, env *Environment) {
 		assert.DumpSnapshotState(ctx)
 		t.Fatalf("prepare: %v", err)
 	}
-	t.Logf("✓ prepared snapshot %s with %d mounts", snapKey, len(mounts))
+	t.Logf("prepared snapshot %s with %d mounts", snapKey, len(mounts))
 
 	t.Log("--- Step 3: Verify snapshot exists ---")
 	assert.SnapshotExists(ctx, snapKey, snapshots.KindActive)
@@ -1143,12 +1114,12 @@ func testSnapshotCleanup(t *testing.T, env *Environment) {
 		assert.DumpSnapshotState(ctx)
 		t.Fatalf("remove: %v", err)
 	}
-	t.Logf("✓ remove operation completed")
+	t.Logf("remove operation completed")
 
 	t.Log("--- Step 5: Verify snapshot removed ---")
 	assert.SnapshotRemoved(ctx, snapKey)
 
-	t.Logf("✓ cleanup test complete: snapshot %s created and removed", snapKey)
+	t.Logf("cleanup test complete: snapshot %s created and removed", snapKey)
 }
 
 // testMultiLayer tests pulling and viewing a multi-layer image.
@@ -1156,28 +1127,16 @@ func testMultiLayer(t *testing.T, env *Environment) {
 	ctx := env.Context()
 	c := env.Client()
 	ss := env.SnapshotService()
+	assert := NewAssertions(t, env)
 
 	// Pull multi-layer image
 	if err := pullImage(ctx, c, multiLayerImage); err != nil {
 		t.Fatalf("pull multi-layer image: %v", err)
 	}
 
-	// Count snapshots (should have multiple)
-	var count int
-	var topSnap string
-	if err := ss.Walk(ctx, func(_ context.Context, info snapshots.Info) error {
-		count++
-		if info.Kind == snapshots.KindCommitted {
-			topSnap = info.Name
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("walk snapshots: %v", err)
-	}
-
-	if count < 2 {
-		t.Fatalf("expected multiple snapshots for multi-layer image, got %d", count)
-	}
+	// Count snapshots and find top committed snapshot
+	count := assert.SnapshotCount(ctx, "multi-layer pull", 2)
+	topSnap := assert.FindCommittedSnapshot(ctx)
 	t.Logf("multi-layer image created %d snapshots", count)
 
 	// Create a view to trigger VMDK generation
@@ -1187,35 +1146,41 @@ func testMultiLayer(t *testing.T, env *Environment) {
 		t.Fatalf("create view: %v", err)
 	}
 	t.Cleanup(func() {
-		ss.Remove(ctx, viewKey)
+		ss.Remove(ctx, viewKey) //nolint:errcheck
 	})
 
-	// Give time for VMDK generation
-	time.Sleep(500 * time.Millisecond)
-
-	// Look for VMDK files
+	// Wait for VMDK generation by polling
 	snapshotsDir := filepath.Join(env.SnapshotterRoot(), "snapshots")
-	var vmdkCount int
-	filepath.Walk(snapshotsDir, func(path string, info os.FileInfo, err error) error {
-		if err == nil && filepath.Base(path) == mergedVMDKFile {
-			vmdkCount++
-			t.Logf("found VMDK: %s", path)
-		}
-		return nil
-	})
+	var vmdkPaths []string
+	err = waitFor(func() bool {
+		vmdkPaths = nil
+		filepath.Walk(snapshotsDir, func(path string, info os.FileInfo, walkErr error) error { //nolint:errcheck
+			if walkErr == nil && filepath.Base(path) == mergedVMDKFile {
+				vmdkPaths = append(vmdkPaths, path)
+			}
+			return nil
+		})
+		return len(vmdkPaths) > 0
+	}, 5*time.Second, "no VMDK files generated")
 
-	if vmdkCount == 0 {
+	if err != nil {
 		t.Error("no VMDK files generated for multi-layer image")
+		return
+	}
+
+	for _, p := range vmdkPaths {
+		t.Logf("found VMDK: %s", p)
 	}
 }
 
 // testVMDKFormat verifies VMDK descriptor format is valid.
 func testVMDKFormat(t *testing.T, env *Environment) {
+	assert := NewAssertions(t, env)
 	snapshotsDir := filepath.Join(env.SnapshotterRoot(), "snapshots")
 
 	// Find a VMDK file
 	var vmdkPath string
-	filepath.Walk(snapshotsDir, func(path string, info os.FileInfo, err error) error {
+	filepath.Walk(snapshotsDir, func(path string, info os.FileInfo, err error) error { //nolint:errcheck
 		if err == nil && filepath.Base(path) == mergedVMDKFile && vmdkPath == "" {
 			vmdkPath = path
 		}
@@ -1226,28 +1191,7 @@ func testVMDKFormat(t *testing.T, env *Environment) {
 		t.Skip("no VMDK file found")
 	}
 
-	// Read and validate VMDK
-	data, err := os.ReadFile(vmdkPath)
-	if err != nil {
-		t.Fatalf("read VMDK: %v", err)
-	}
-
-	content := string(data)
-
-	// Check required fields
-	requiredFields := []string{"version=", "CID=", "createType="}
-	for _, field := range requiredFields {
-		if !strings.Contains(content, field) {
-			t.Errorf("VMDK missing required field: %s", field)
-		}
-	}
-
-	// Check extent format
-	extentPattern := regexp.MustCompile(`RW\s+\d+\s+FLAT\s+"[^"]+"\s+\d+`)
-	if !extentPattern.MatchString(content) {
-		t.Error("VMDK has no valid extent definitions")
-	}
-
+	assert.VMDKValid(vmdkPath)
 	t.Logf("VMDK format validated: %s", vmdkPath)
 }
 
@@ -1313,7 +1257,6 @@ func parseVMDKLayers(path string) ([]string, error) {
 
 	var layers []string
 	scanner := bufio.NewScanner(f)
-	extentPattern := regexp.MustCompile(`RW\s+\d+\s+FLAT\s+"([^"]+)"`)
 
 	for scanner.Scan() {
 		if matches := extentPattern.FindStringSubmatch(scanner.Text()); len(matches) > 1 {
@@ -1344,8 +1287,7 @@ func readLayersManifest(path string) ([]string, error) {
 
 // extractDigest extracts a sha256 digest from a layer path.
 func extractDigest(path string) string {
-	pattern := regexp.MustCompile(`sha256-([a-f0-9]{64})\.erofs`)
-	if matches := pattern.FindStringSubmatch(path); len(matches) > 1 {
+	if matches := digestPattern.FindStringSubmatch(path); len(matches) > 1 {
 		return matches[1]
 	}
 	return ""
@@ -1355,17 +1297,10 @@ func extractDigest(path string) string {
 func testCommitLifecycle(t *testing.T, env *Environment) {
 	ctx := env.Context()
 	ss := env.SnapshotService()
+	assert := NewAssertions(t, env)
 
 	// Find a committed parent
-	var parentKey string
-	if err := ss.Walk(ctx, func(_ context.Context, info snapshots.Info) error {
-		if info.Kind == snapshots.KindCommitted && parentKey == "" {
-			parentKey = info.Name
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("walk snapshots: %v", err)
-	}
+	parentKey := assert.FindCommittedSnapshot(ctx)
 
 	// Create active snapshot
 	ts := time.Now().UnixNano()
@@ -1375,7 +1310,7 @@ func testCommitLifecycle(t *testing.T, env *Environment) {
 		t.Fatalf("prepare: %v", err)
 	}
 	t.Cleanup(func() {
-		ss.Remove(ctx, activeKey)
+		ss.Remove(ctx, activeKey) //nolint:errcheck
 	})
 
 	// Find ext4 rwlayer path
@@ -1400,14 +1335,14 @@ func testCommitLifecycle(t *testing.T, env *Environment) {
 	// Write test data
 	upperDir := filepath.Join(mountPoint, "upper")
 	if err := os.MkdirAll(upperDir, 0755); err != nil {
-		unmountExt4(mountPoint)
+		unmountExt4(mountPoint) //nolint:errcheck
 		t.Fatalf("create upper dir: %v", err)
 	}
 
 	testFile := filepath.Join(upperDir, "lifecycle-test.bin")
 	testData := bytes.Repeat([]byte("x"), 1024*1024) // 1MB
 	if err := os.WriteFile(testFile, testData, 0644); err != nil {
-		unmountExt4(mountPoint)
+		unmountExt4(mountPoint) //nolint:errcheck
 		t.Fatalf("write test file: %v", err)
 	}
 
@@ -1421,19 +1356,11 @@ func testCommitLifecycle(t *testing.T, env *Environment) {
 		t.Fatalf("commit: %v", err)
 	}
 	t.Cleanup(func() {
-		ss.Remove(ctx, commitKey)
+		ss.Remove(ctx, commitKey) //nolint:errcheck
 	})
 
 	// Verify committed snapshot
-	info, err := ss.Stat(ctx, commitKey)
-	if err != nil {
-		t.Fatalf("stat committed: %v", err)
-	}
-
-	if info.Kind != snapshots.KindCommitted {
-		t.Errorf("expected KindCommitted, got %v", info.Kind)
-	}
-
+	assert.SnapshotExists(ctx, commitKey, snapshots.KindCommitted)
 	t.Log("commit lifecycle test passed")
 }
 
@@ -1490,15 +1417,16 @@ func testFullCleanup(t *testing.T, env *Environment) {
 		}
 	}
 
-	// Wait for cleanup
-	time.Sleep(time.Second)
-
-	// Verify no snapshots remain
+	// Wait for cleanup by polling
 	var remaining int
-	ss.Walk(ctx, func(_ context.Context, _ snapshots.Info) error {
-		remaining++
-		return nil
-	})
+	_ = waitFor(func() bool {
+		remaining = 0
+		ss.Walk(ctx, func(_ context.Context, _ snapshots.Info) error { //nolint:errcheck
+			remaining++
+			return nil
+		})
+		return remaining == 0
+	}, 5*time.Second, "snapshots not cleaned up")
 
 	if remaining > 0 {
 		t.Errorf("%d snapshots still registered after cleanup", remaining)
@@ -1517,121 +1445,6 @@ func testFullCleanup(t *testing.T, env *Environment) {
 	}
 
 	t.Log("cleanup verification complete")
-}
-
-// ============================================================================
-// Benchmark Tests
-// ============================================================================
-
-// BenchmarkSnapshotPrepare benchmarks snapshot preparation.
-func BenchmarkSnapshotPrepare(b *testing.B) {
-	if err := checkPrerequisites(); err != nil {
-		b.Skipf("prerequisites not met: %v", err)
-	}
-
-	t := &testing.T{}
-	env := NewEnvironment(t)
-	defer env.Stop()
-
-	if err := env.Start(); err != nil {
-		b.Fatalf("start environment: %v", err)
-	}
-
-	ctx := env.Context()
-	ss := env.SnapshotService()
-
-	// Pull test image
-	if err := pullImage(ctx, env.Client(), defaultTestImage); err != nil {
-		b.Fatalf("pull image: %v", err)
-	}
-
-	// Find committed parent
-	var parentKey string
-	ss.Walk(ctx, func(_ context.Context, info snapshots.Info) error {
-		if info.Kind == snapshots.KindCommitted && parentKey == "" {
-			parentKey = info.Name
-		}
-		return nil
-	})
-
-	b.ResetTimer()
-
-	for i := range b.N {
-		key := fmt.Sprintf("bench-%d", i)
-		_, err := ss.Prepare(ctx, key, parentKey)
-		if err != nil {
-			b.Fatalf("prepare: %v", err)
-		}
-		ss.Remove(ctx, key)
-	}
-}
-
-// ============================================================================
-// Error Types
-// ============================================================================
-
-// ErrServiceNotReady indicates a service is not ready.
-var ErrServiceNotReady = errors.New("service not ready")
-
-// ErrSnapshotNotFound indicates a snapshot was not found.
-var ErrSnapshotNotFound = errors.New("snapshot not found")
-
-// ============================================================================
-// Additional Helpers
-// ============================================================================
-
-// VerifyVMDK provides detailed VMDK verification for debugging.
-type VerifyVMDK struct {
-	Path       string
-	Layers     []VMDKLayer
-	FsmetaPath string
-	TotalSize  int64
-}
-
-// VMDKLayer represents a layer in a VMDK descriptor.
-type VMDKLayer struct {
-	Path    string
-	Sectors int64
-	Digest  digest.Digest
-}
-
-// ParseVMDK parses a VMDK descriptor file for verification.
-func ParseVMDK(path string) (*VerifyVMDK, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	v := &VerifyVMDK{Path: path}
-	scanner := bufio.NewScanner(f)
-	extentPattern := regexp.MustCompile(`RW\s+(\d+)\s+FLAT\s+"([^"]+)"`)
-
-	for scanner.Scan() {
-		if matches := extentPattern.FindStringSubmatch(scanner.Text()); len(matches) > 2 {
-			var sectors int64
-			fmt.Sscanf(matches[1], "%d", &sectors)
-
-			layer := VMDKLayer{
-				Path:    matches[2],
-				Sectors: sectors,
-			}
-
-			// Extract digest if present
-			if d := extractDigest(matches[2]); d != "" {
-				layer.Digest = digest.Digest("sha256:" + d)
-			}
-
-			v.Layers = append(v.Layers, layer)
-			v.TotalSize += sectors * 512
-
-			if strings.Contains(matches[2], "fsmeta.erofs") {
-				v.FsmetaPath = matches[2]
-			}
-		}
-	}
-
-	return v, scanner.Err()
 }
 
 // findVMDKWithMostLayers finds the VMDK file with the most layers.
