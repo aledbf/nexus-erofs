@@ -257,6 +257,8 @@ func (s *snapshotter) cleanupAfterRemove(ctx context.Context, id string, removal
 	if err := unmountAll(s.blockRwMountPath(id)); err != nil {
 		log.G(ctx).WithError(err).WithField("id", id).Warnf("failed to cleanup block rw mount")
 	}
+	// Clear mount state tracking
+	s.mountTracker.SetUnmounted(id)
 
 	for _, dir := range removals {
 		if err := os.RemoveAll(dir); err != nil {

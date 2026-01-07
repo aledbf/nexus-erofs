@@ -291,6 +291,9 @@ func (s *snapshotter) mountBlockRwLayer(ctx context.Context, id string) error {
 		return fmt.Errorf("failed to create work directory: %w", err)
 	}
 
+	// Track mount state explicitly
+	s.mountTracker.SetMounted(id)
+
 	log.G(ctx).WithFields(log.Fields{
 		"id":     id,
 		"target": rwMountPath,

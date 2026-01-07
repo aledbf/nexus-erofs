@@ -74,6 +74,10 @@ type snapshotter struct {
 	enableFsverity  bool
 	setImmutable    bool
 	defaultWritable int64
+
+	// mountTracker tracks ext4 block mount states for extract snapshots.
+	// This provides explicit state tracking instead of filesystem checks.
+	mountTracker *MountTracker
 }
 
 // extractLabel is the label key used to mark snapshots for layer extraction.
@@ -133,6 +137,7 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		enableFsverity:  config.enableFsverity,
 		setImmutable:    config.setImmutable,
 		defaultWritable: config.defaultSize,
+		mountTracker:    NewMountTracker(),
 	}
 
 	// Clean up any orphaned mounts from previous runs.
@@ -144,6 +149,7 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 // Close releases all resources held by the snapshotter.
 func (s *snapshotter) Close() error {
 	s.cleanupBlockMounts()
+	s.mountTracker.Clear() // Clear mount state tracking
 	return s.ms.Close()
 }
 

@@ -13,7 +13,6 @@ import (
 	"github.com/containerd/containerd/v2/core/snapshots/storage"
 	"github.com/containerd/continuity/fs"
 	"github.com/containerd/log"
-	"github.com/moby/sys/mountinfo"
 	"github.com/opencontainers/go-digest"
 
 	"github.com/aledbf/nexus-erofs/internal/erofs"
@@ -76,22 +75,19 @@ func (s *snapshotter) commitSourceFromOverlay(ctx context.Context, id string) (*
 // commitSourceFromBlock returns the commit source for block mode.
 // This handles the case where an ext4 image needs to be mounted.
 //
-// WHY MOUNT CHECK:
-// Extract snapshots mount ext4 during Prepare() so differs can write.
-// For those, the mount already exists. For crash recovery or other cases,
-// we may need to mount read-only to access the contents.
+// WHY EXPLICIT STATE CHECK:
+// We use the mount tracker instead of mountinfo.Mounted() because:
+//   - mountinfo.Mounted() can fail on non-existent paths
+//   - Race conditions between check and use
+//   - Explicit state is easier to reason about and test
+//
+// Extract snapshots mount ext4 during Prepare() and track it in mounts.
+// For crash recovery, the tracker will be empty so we mount read-only.
 func (s *snapshotter) commitSourceFromBlock(ctx context.Context, id, rwLayer string) (*commitSource, error) {
 	rwMount := s.blockRwMountPath(id)
 
-	// Check if already mounted (from Prepare for extract snapshots)
-	alreadyMounted := false
-	if _, err := os.Stat(rwMount); err == nil {
-		var mountErr error
-		alreadyMounted, mountErr = mountinfo.Mounted(rwMount)
-		if mountErr != nil {
-			return nil, fmt.Errorf("check mount status: %w", mountErr)
-		}
-	}
+	// Check mount tracker for explicit state (preferred over filesystem check)
+	alreadyMounted := s.mountTracker.IsMounted(id)
 
 	needsUnmount := false
 	if !alreadyMounted {
@@ -117,6 +113,8 @@ func (s *snapshotter) commitSourceFromBlock(ctx context.Context, id, rwLayer str
 				log.G(ctx).WithError(err).WithField("id", id).Warn("failed to cleanup block mount after commit")
 			}
 		}
+		// Clear mount state regardless of who mounted it - commit is done
+		s.mountTracker.SetUnmounted(id)
 	}
 
 	return &commitSource{
@@ -367,7 +365,7 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 	}
 
 	// Commit to metadata in a write transaction
-	return s.ms.WithTransaction(ctx, true, func(ctx context.Context) error {
+	err = s.ms.WithTransaction(ctx, true, func(ctx context.Context) error {
 		if _, err := os.Stat(layerBlob); err != nil {
 			return fmt.Errorf("verify layer blob: %w", err)
 		}
@@ -389,4 +387,19 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	// Cleanup the ext4 mount from Prepare (for extract snapshots).
+	// The EROFS blob now contains the layer data, so the ext4 is no longer needed.
+	if s.mountTracker.IsMounted(id) {
+		rwMount := s.blockRwMountPath(id)
+		if unmountErr := unmountAll(rwMount); unmountErr != nil {
+			log.G(ctx).WithError(unmountErr).WithField("id", id).Warn("failed to cleanup ext4 mount after commit")
+		}
+		s.mountTracker.SetUnmounted(id)
+	}
+
+	return nil
 }
