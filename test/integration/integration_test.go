@@ -52,7 +52,8 @@ const (
 	defaultTestImage = "ghcr.io/containerd/alpine:3.14.0"
 
 	// multiLayerImage is an image with multiple layers for VMDK tests.
-	multiLayerImage = "docker.io/library/nginx:1.27-alpine"
+	// Using quay.io to avoid Docker Hub rate limits in CI.
+	multiLayerImage = "quay.io/prometheus/node-exporter:latest"
 
 	// snapshotterName is the name of the snapshotter under test.
 	snapshotterName = "nexus-erofs"
@@ -261,22 +262,65 @@ func (a *Assertions) FindCommittedSnapshot(ctx context.Context) string {
 	a.t.Helper()
 	ss := a.env.SnapshotService()
 
-	var parentKey string
+	// Collect all committed snapshots and their parents
+	committed := make(map[string]string) // name -> parent
 	if err := ss.Walk(ctx, func(_ context.Context, info snapshots.Info) error {
-		if info.Kind == snapshots.KindCommitted && parentKey == "" {
-			parentKey = info.Name
+		if info.Kind == snapshots.KindCommitted {
+			committed[info.Name] = info.Parent
 		}
 		return nil
 	}); err != nil {
 		a.t.Fatalf("walk snapshots: %v", err)
 	}
 
-	if parentKey == "" {
+	if len(committed) == 0 {
 		a.t.Fatal("no committed snapshot found")
 	}
 
-	a.t.Logf("found committed snapshot: %s", parentKey)
-	return parentKey
+	// Find leaf snapshots (ones that are not a parent of any other committed snapshot)
+	isParent := make(map[string]bool)
+	for _, parent := range committed {
+		if parent != "" {
+			isParent[parent] = true
+		}
+	}
+
+	// Count ancestors for each leaf snapshot to find the deepest one
+	countAncestors := func(name string) int {
+		count := 0
+		for {
+			parent, exists := committed[name]
+			if !exists || parent == "" {
+				break
+			}
+			count++
+			name = parent
+		}
+		return count
+	}
+
+	var topKey string
+	maxAncestors := -1
+	for name := range committed {
+		if !isParent[name] {
+			ancestors := countAncestors(name)
+			if ancestors > maxAncestors {
+				maxAncestors = ancestors
+				topKey = name
+			}
+		}
+	}
+
+	// If no leaves found (shouldn't happen), fall back to any committed snapshot
+	if topKey == "" {
+		for name := range committed {
+			topKey = name
+			break
+		}
+	}
+
+	a.t.Logf("found committed snapshot: %s (depth: %d)", topKey, maxAncestors+1)
+	return topKey
 }
 
 // VMDKValid verifies a VMDK file has valid format.
@@ -1169,28 +1213,25 @@ func testMultiLayer(t *testing.T, env *Environment) {
 		ss.Remove(ctx, viewKey) //nolint:errcheck
 	})
 
-	// Wait for VMDK generation by polling
+	// Wait for a multi-layer VMDK to be generated (fsmeta generation is async).
+	// The single-layer alpine image may already have a VMDK, so we need to wait
+	// specifically for a VMDK with 2+ layers from the multi-layer image.
 	snapshotsDir := filepath.Join(env.SnapshotterRoot(), "snapshots")
-	var vmdkPaths []string
+	var multiLayerVMDK string
+	var layerCount int
 	err = waitFor(func() bool {
-		vmdkPaths = nil
-		filepath.Walk(snapshotsDir, func(path string, info os.FileInfo, walkErr error) error { //nolint:errcheck
-			if walkErr == nil && filepath.Base(path) == mergedVMDKFile {
-				vmdkPaths = append(vmdkPaths, path)
-			}
-			return nil
-		})
-		return len(vmdkPaths) > 0
-	}, 5*time.Second, "no VMDK files generated")
+		multiLayerVMDK, layerCount = findVMDKWithMostLayers(snapshotsDir)
+		return layerCount >= 2
+	}, 15*time.Second, "waiting for multi-layer VMDK")
 
 	if err != nil {
-		t.Error("no VMDK files generated for multi-layer image")
+		// Log what we found for debugging
+		multiLayerVMDK, layerCount = findVMDKWithMostLayers(snapshotsDir)
+		t.Errorf("no multi-layer VMDK generated after waiting (found: %s with %d layers)", multiLayerVMDK, layerCount)
 		return
 	}
 
-	for _, p := range vmdkPaths {
-		t.Logf("found VMDK: %s", p)
-	}
+	t.Logf("found multi-layer VMDK: %s (%d layers)", multiLayerVMDK, layerCount)
 }
 
 // testVMDKFormat verifies VMDK descriptor format is valid.
@@ -1198,32 +1239,33 @@ func testVMDKFormat(t *testing.T, env *Environment) {
 	assert := NewAssertions(t, env)
 	snapshotsDir := filepath.Join(env.SnapshotterRoot(), "snapshots")
 
-	// Find a VMDK file
-	var vmdkPath string
-	filepath.Walk(snapshotsDir, func(path string, info os.FileInfo, err error) error { //nolint:errcheck
-		if err == nil && filepath.Base(path) == mergedVMDKFile && vmdkPath == "" {
-			vmdkPath = path
-		}
-		return nil
-	})
+	// Find the VMDK with most layers for validation
+	vmdkPath, layers := findVMDKWithMostLayers(snapshotsDir)
 
 	if vmdkPath == "" {
-		t.Skip("no VMDK file found")
+		t.Fatal("no VMDK file found - multi_layer test should have created one")
 	}
 
 	assert.VMDKValid(vmdkPath)
-	t.Logf("VMDK format validated: %s", vmdkPath)
+	t.Logf("VMDK format validated: %s (%d layers)", vmdkPath, layers)
 }
 
 // testVMDKLayerOrder verifies VMDK layers are in correct order.
 func testVMDKLayerOrder(t *testing.T, env *Environment) {
 	snapshotsDir := filepath.Join(env.SnapshotterRoot(), "snapshots")
 
-	// Find VMDK with multiple layers
-	vmdkPath, maxLayers := findVMDKWithMostLayers(snapshotsDir)
+	// Wait for a VMDK with at least 2 layers (fsmeta generation is async)
+	var vmdkPath string
+	var maxLayers int
+	err := waitFor(func() bool {
+		vmdkPath, maxLayers = findVMDKWithMostLayers(snapshotsDir)
+		return maxLayers >= 2
+	}, 10*time.Second, "waiting for multi-layer VMDK")
 
-	if vmdkPath == "" || maxLayers < 2 {
-		t.Skip("no multi-layer VMDK found")
+	if err != nil {
+		// Log what we found for debugging
+		vmdkPath, maxLayers = findVMDKWithMostLayers(snapshotsDir)
+		t.Fatalf("no multi-layer VMDK found after waiting (found: %s with %d layers) - multi_layer test should have created one", vmdkPath, maxLayers)
 	}
 
 	// Parse VMDK
@@ -1343,7 +1385,7 @@ func testCommitLifecycle(t *testing.T, env *Environment) {
 	}
 
 	if rwlayerPath == "" {
-		t.Skip("no ext4 mount returned, skipping lifecycle test")
+		t.Fatal("no ext4 mount returned - Prepare() should return ext4 writable layer")
 	}
 
 	// Mount ext4, write data, unmount
@@ -1403,13 +1445,14 @@ func unmountExt4(target string) error {
 	return nil
 }
 
-// testFullCleanup verifies all resources are cleaned up properly.
+// testFullCleanup verifies all resources are cleaned up properly after image deletion.
+// This test checks that containerd properly cascades cleanup to snapshots.
 func testFullCleanup(t *testing.T, env *Environment) {
 	ctx := env.Context()
 	c := env.Client()
 	ss := env.SnapshotService()
 
-	// Remove all images
+	// Delete all images - this should trigger automatic snapshot cleanup
 	imgService := c.ImageService()
 	imgs, err := imgService.List(ctx)
 	if err != nil {
@@ -1422,34 +1465,23 @@ func testFullCleanup(t *testing.T, env *Environment) {
 		}
 	}
 
-	// Remove all snapshots (in reverse order to handle dependencies)
-	var keys []string
-	if err := ss.Walk(ctx, func(_ context.Context, info snapshots.Info) error {
-		keys = append(keys, info.Name)
-		return nil
-	}); err != nil {
-		t.Fatalf("walk snapshots: %v", err)
-	}
-
-	for i := len(keys) - 1; i >= 0; i-- {
-		if err := ss.Remove(ctx, keys[i]); err != nil {
-			t.Logf("remove snapshot %s: %v", keys[i], err)
-		}
-	}
-
-	// Wait for cleanup by polling
-	var remaining int
+	// Wait for containerd to clean up snapshots automatically
+	var remaining []snapshots.Info
 	_ = waitFor(func() bool {
-		remaining = 0
-		ss.Walk(ctx, func(_ context.Context, _ snapshots.Info) error { //nolint:errcheck
-			remaining++
+		remaining = nil
+		ss.Walk(ctx, func(_ context.Context, info snapshots.Info) error { //nolint:errcheck
+			remaining = append(remaining, info)
 			return nil
 		})
-		return remaining == 0
+		return len(remaining) == 0
 	}, 5*time.Second, "snapshots not cleaned up")
 
-	if remaining > 0 {
-		t.Errorf("%d snapshots still registered after cleanup", remaining)
+	// Report any leaked snapshots (don't try to remove them - that would mask bugs)
+	if len(remaining) > 0 {
+		t.Errorf("%d snapshots still registered after image deletion:", len(remaining))
+		for _, info := range remaining {
+			t.Logf("  leaked snapshot: %s (parent: %q, kind: %v)", info.Name, info.Parent, info.Kind)
+		}
 	}
 
 	// Check for leaked files

@@ -1,5 +1,9 @@
 # Nexus EROFS
 
+[![CI](https://github.com/aledbf/nexus-erofs/actions/workflows/ci.yml/badge.svg)](https://github.com/aledbf/nexus-erofs/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/aledbf/nexus-erofs/branch/main/graph/badge.svg)](https://codecov.io/gh/aledbf/nexus-erofs)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 A containerd snapshotter that converts OCI image layers to EROFS and returns raw file paths for VM-based container runtimes.
 
 ## Why nexus-erofs?
