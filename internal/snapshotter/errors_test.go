@@ -24,16 +24,19 @@ func TestLayerBlobNotFoundError(t *testing.T) {
 		t.Errorf("error message should contain searched patterns: %s", msg)
 	}
 
-	// Test errors.Is
+	// Test errors.As for type-based matching (idiomatic Go)
 	var target *LayerBlobNotFoundError
-	if !errors.Is(err, target) {
-		t.Error("errors.Is should match LayerBlobNotFoundError")
+	if !errors.As(err, &target) {
+		t.Error("errors.As should match LayerBlobNotFoundError")
+	}
+	if target.SnapshotID != "snap-123" {
+		t.Errorf("errors.As should preserve fields, got SnapshotID=%q", target.SnapshotID)
 	}
 
-	// Test errors.Is with different error type
+	// Test errors.As with different error type
 	var otherTarget *BlockMountError
-	if errors.Is(err, otherTarget) {
-		t.Error("errors.Is should not match different error type")
+	if errors.As(err, &otherTarget) {
+		t.Error("errors.As should not match different error type")
 	}
 }
 

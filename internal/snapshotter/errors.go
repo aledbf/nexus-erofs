@@ -18,12 +18,6 @@ func (e *LayerBlobNotFoundError) Error() string {
 		e.SnapshotID, e.Dir, e.Searched)
 }
 
-// Is implements errors.Is for error matching.
-func (e *LayerBlobNotFoundError) Is(target error) bool {
-	_, ok := target.(*LayerBlobNotFoundError)
-	return ok
-}
-
 // BlockMountError indicates ext4 block mount failure during commit.
 // This occurs when the rwlayer.img cannot be mounted to read upper contents.
 type BlockMountError struct {

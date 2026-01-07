@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestLayerSequenceConcurrentAccess verifies LayerSequence is safe for concurrent reads.
@@ -105,8 +106,8 @@ func TestRetryWithConcurrentCalls(t *testing.T) {
 
 	cfg := RetryConfig{
 		MaxAttempts: 3,
-		InitialWait: 1,
-		MaxWait:     5,
+		InitialWait: 1 * time.Millisecond,
+		MaxWait:     5 * time.Millisecond,
 		Multiplier:  2.0,
 	}
 

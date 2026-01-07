@@ -4,35 +4,40 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
-// TestLayerBlobNotFoundErrorIs verifies errors.Is works correctly with nil target.
-func TestLayerBlobNotFoundErrorIs(t *testing.T) {
+// TestLayerBlobNotFoundErrorAs verifies errors.As works correctly for type matching.
+// Note: We use errors.As (not errors.Is) for structural error types per Go idioms.
+func TestLayerBlobNotFoundErrorAs(t *testing.T) {
 	err := &LayerBlobNotFoundError{
 		SnapshotID: "test-123",
 		Dir:        "/test/path",
 		Searched:   []string{"*.erofs"},
 	}
 
-	// Test that Is() matches nil pointer of same type (Go's errors.Is behavior)
-	var nilTarget *LayerBlobNotFoundError
-	if !errors.Is(err, nilTarget) {
-		t.Error("errors.Is should match nil pointer of same error type")
+	// Test errors.As for type-based matching
+	var target *LayerBlobNotFoundError
+	if !errors.As(err, &target) {
+		t.Error("errors.As should match LayerBlobNotFoundError")
+	}
+	if target.SnapshotID != "test-123" {
+		t.Errorf("expected snapshot ID test-123, got %s", target.SnapshotID)
 	}
 
-	// Test that wrapped error still works
+	// Test that wrapped error can be unwrapped with errors.As
 	wrapped := &CommitConversionError{
 		SnapshotID: "commit-test",
 		UpperDir:   "/upper",
 		Cause:      err,
 	}
 
-	var target *LayerBlobNotFoundError
-	if !errors.As(wrapped, &target) {
+	var wrappedTarget *LayerBlobNotFoundError
+	if !errors.As(wrapped, &wrappedTarget) {
 		t.Error("errors.As should find LayerBlobNotFoundError in chain")
 	}
-	if target.SnapshotID != "test-123" {
-		t.Errorf("expected snapshot ID test-123, got %s", target.SnapshotID)
+	if wrappedTarget.SnapshotID != "test-123" {
+		t.Errorf("expected snapshot ID test-123, got %s", wrappedTarget.SnapshotID)
 	}
 }
 
@@ -91,8 +96,8 @@ func TestIncompatibleBlockSizeErrorFields(t *testing.T) {
 func TestRetryExhaustedError(t *testing.T) {
 	cfg := RetryConfig{
 		MaxAttempts: 3,
-		InitialWait: 1,
-		MaxWait:     1,
+		InitialWait: 1 * time.Millisecond,
+		MaxWait:     1 * time.Millisecond,
 		Multiplier:  1.0,
 	}
 
@@ -166,31 +171,35 @@ func TestNilSliceLayerSequence(t *testing.T) {
 	_ = seq.ToNewestFirst()
 }
 
-// TestRetryZeroAttempts verifies edge case of zero attempts.
+// TestRetryZeroAttempts verifies edge case of zero attempts returns an error.
 func TestRetryZeroAttempts(t *testing.T) {
 	cfg := RetryConfig{
 		MaxAttempts: 0,
-		InitialWait: 1,
-		MaxWait:     1,
+		InitialWait: 1 * time.Millisecond,
+		MaxWait:     1 * time.Millisecond,
 		Multiplier:  1.0,
 	}
 
-	// With 0 max attempts, the function should never be called
 	called := false
 	err := Retry(context.Background(), cfg, func() error {
 		called = true
 		return nil
 	})
 
-	// This is expected to return an error since no attempts were made
-	if called {
-		// Note: Current implementation would call the function at least once
-		// This test documents the behavior
-		t.Log("function was called even with MaxAttempts=0")
+	// Should return an error for invalid config
+	if err == nil {
+		t.Error("expected error for MaxAttempts=0")
 	}
 
-	// Error should indicate 0 attempts (if the implementation wraps)
-	_ = err
+	// Function should never be called
+	if called {
+		t.Error("function should not be called with MaxAttempts=0")
+	}
+
+	// Error message should indicate the problem
+	if !errContains(err.Error(), "MaxAttempts") {
+		t.Errorf("error should mention MaxAttempts: %v", err)
+	}
 }
 
 // TestBlockMountErrorNilCause verifies nil cause is handled.

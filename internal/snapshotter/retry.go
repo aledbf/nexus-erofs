@@ -38,33 +38,10 @@ var DefaultRetryConfig = RetryConfig{
 //	    return syncFile(path)
 //	})
 func Retry(ctx context.Context, cfg RetryConfig, fn func() error) error {
-	var lastErr error
-	wait := cfg.InitialWait
-
-	for attempt := 1; attempt <= cfg.MaxAttempts; attempt++ {
-		if err := fn(); err == nil {
-			return nil
-		} else {
-			lastErr = err
-		}
-
-		// Don't wait after last attempt
-		if attempt == cfg.MaxAttempts {
-			break
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(wait):
-			wait = time.Duration(float64(wait) * cfg.Multiplier)
-			if wait > cfg.MaxWait {
-				wait = cfg.MaxWait
-			}
-		}
-	}
-
-	return fmt.Errorf("after %d attempts: %w", cfg.MaxAttempts, lastErr)
+	_, err := retryLoop(ctx, cfg, func() (struct{}, error) {
+		return struct{}{}, fn()
+	})
+	return err
 }
 
 // RetryWithResult executes fn with exponential backoff, returning both result and error.
@@ -76,8 +53,20 @@ func Retry(ctx context.Context, cfg RetryConfig, fn func() error) error {
 //	    return findLayerBlob(id)
 //	})
 func RetryWithResult[T any](ctx context.Context, cfg RetryConfig, fn func() (T, error)) (T, error) {
-	var lastErr error
+	return retryLoop(ctx, cfg, fn)
+}
+
+// retryLoop is the common implementation for retry logic.
+// It handles exponential backoff with proper timer cleanup to avoid memory leaks.
+func retryLoop[T any](ctx context.Context, cfg RetryConfig, fn func() (T, error)) (T, error) {
 	var zero T
+
+	// Validate MaxAttempts to prevent nil error wrapping
+	if cfg.MaxAttempts < 1 {
+		return zero, fmt.Errorf("invalid retry config: MaxAttempts must be >= 1, got %d", cfg.MaxAttempts)
+	}
+
+	var lastErr error
 	wait := cfg.InitialWait
 
 	for attempt := 1; attempt <= cfg.MaxAttempts; attempt++ {
@@ -92,18 +81,35 @@ func RetryWithResult[T any](ctx context.Context, cfg RetryConfig, fn func() (T, 
 			break
 		}
 
-		select {
-		case <-ctx.Done():
-			return zero, ctx.Err()
-		case <-time.After(wait):
-			wait = time.Duration(float64(wait) * cfg.Multiplier)
-			if wait > cfg.MaxWait {
-				wait = cfg.MaxWait
-			}
+		// Use time.NewTimer instead of time.After to avoid memory leak.
+		// time.After timers are not garbage collected until they fire,
+		// even if the context is canceled.
+		if err := waitWithContext(ctx, wait); err != nil {
+			return zero, err
+		}
+
+		// Calculate next wait with exponential backoff
+		wait = time.Duration(float64(wait) * cfg.Multiplier)
+		if wait > cfg.MaxWait {
+			wait = cfg.MaxWait
 		}
 	}
 
 	return zero, fmt.Errorf("after %d attempts: %w", cfg.MaxAttempts, lastErr)
+}
+
+// waitWithContext waits for the specified duration or until context is canceled.
+// Uses time.NewTimer for proper cleanup to avoid memory leaks.
+func waitWithContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // IsRetryable returns true if the error is likely transient and worth retrying.
