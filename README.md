@@ -372,14 +372,18 @@ version = 2
 | `--containerd-namespace` | `default` | containerd namespace to use |
 | `--log-level` | `info` | Log level (debug, info, warn, error) |
 | `--default-size` | `64M` | Size of ext4 writable layer (bytes) |
-| `--enable-fsverity` | `false` | Enable fsverity for layer validation |
 | `--set-immutable` | `true` | Set immutable flag on committed layers |
-| `--mkfs-options` | | Extra options for mkfs.erofs (e.g., `-zlz4hc,12`) |
 | `--version` | | Show version information |
 
-### Layer Conversion and fsmeta
+### Layer Conversion and Compression
 
-Layers are created using full conversion mode (`--tar=f`), which converts tar archives to EROFS format with 4096-byte blocks. This ensures compatibility with fsmeta merge, allowing multi-layer images to be consolidated into a single mount with a VMDK descriptor for efficient VM handling.
+Layers are created using full conversion mode (`--tar=f`) with LZ4HC compression at level 9 (`-zlz4hc,9`). This configuration provides:
+
+- **Good compression ratio**: LZ4HC achieves reasonable size reduction
+- **Fast decompression**: LZ4 has the lowest decompression latency among supported compressors
+- **Optimal random read performance**: Default 4KB physical clusters are preserved (no `-C` flag)
+
+This is a deliberate trade-off: we prioritize runtime I/O performance over maximum compression ratio, which benefits container startup time in VMs. The 4096-byte block size also ensures compatibility with fsmeta merge for multi-layer images.
 
 ## License
 
