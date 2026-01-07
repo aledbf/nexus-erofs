@@ -111,10 +111,13 @@ func (s *snapshotter) commitSourceFromBlock(ctx context.Context, id, rwLayer str
 		if needsUnmount {
 			if err := unmountAll(rwMount); err != nil {
 				log.G(ctx).WithError(err).WithField("id", id).Warn("failed to cleanup block mount after commit")
+				// Don't clear mount state if unmount failed - state should reflect reality
+				return
 			}
+			// Only clear mount state if we mounted it and unmount succeeded
+			s.mountTracker.SetUnmounted(id)
 		}
-		// Clear mount state regardless of who mounted it - commit is done
-		s.mountTracker.SetUnmounted(id)
+		// If needsUnmount is false, someone else mounted it and is responsible for cleanup
 	}
 
 	return &commitSource{
@@ -196,9 +199,15 @@ func (s *snapshotter) generateFsMeta(ctx context.Context, parentIDs LayerSequenc
 		return
 	}
 
+	// Validate ordering assumption - this function expects newest-first order
+	if !parentIDs.IsNewestFirst {
+		log.G(ctx).Warn("generateFsMeta received oldest-first sequence, expected newest-first")
+		return
+	}
+
 	t1 := time.Now()
 
-	// Use the newest snapshot's directory for output files
+	// Use the newest snapshot's directory for output files (IDs[0] is newest when IsNewestFirst=true)
 	newestID := parentIDs.IDs[0]
 	mergedMeta := s.fsMetaPath(newestID)
 	vmdkFile := s.vmdkPath(newestID)

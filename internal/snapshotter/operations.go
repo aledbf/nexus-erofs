@@ -116,8 +116,11 @@ func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 
 	// Generate VMDK for VM runtimes - always generate when there are parent layers.
 	// ParentIDs come from the snapshot chain in newest-first order.
+	// Run async to avoid blocking Prepare/View - fsmeta generation is expensive
+	// but not required for basic snapshot operations. Use WithoutCancel so the
+	// goroutine isn't cancelled when the parent request completes.
 	if !isExtractKey(key) && len(snap.ParentIDs) > 0 {
-		s.generateFsMeta(ctx, NewNewestFirst(snap.ParentIDs))
+		go s.generateFsMeta(context.WithoutCancel(ctx), NewNewestFirst(snap.ParentIDs))
 	}
 
 	// For active snapshots, create the writable ext4 layer file.

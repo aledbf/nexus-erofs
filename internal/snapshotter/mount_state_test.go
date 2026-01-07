@@ -1,6 +1,7 @@
 package snapshotter
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 )
@@ -88,12 +89,12 @@ func TestMountTrackerConcurrentAccess(t *testing.T) {
 
 	var wg sync.WaitGroup
 
-	// Concurrent mounts
+	// Concurrent mounts - each goroutine gets unique ID
 	for i := range numGoroutines {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			snapID := string(rune('a' + id%26))
+			snapID := fmt.Sprintf("snap-%d", id)
 			tracker.SetMounted(snapID)
 			_ = tracker.IsMounted(snapID)
 		}(i)
@@ -101,12 +102,12 @@ func TestMountTrackerConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 
-	// Concurrent unmounts
+	// Concurrent unmounts - each goroutine gets unique ID
 	for i := range numGoroutines {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			snapID := string(rune('a' + id%26))
+			snapID := fmt.Sprintf("snap-%d", id)
 			tracker.SetUnmounted(snapID)
 			_ = tracker.IsMounted(snapID)
 		}(i)
