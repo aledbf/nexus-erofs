@@ -23,19 +23,17 @@
 // # Two Commit Modes
 //
 // The commit process reads files from either block mode or overlay mode.
-// Mode detection happens in [resolveCommitSource].
+// Mode detection happens in [getCommitUpperDir].
 //
 // BLOCK MODE (extract snapshots):
 //   - Condition: rwlayer.img exists in snapshot directory
 //   - Used when: EROFS differ writes to host-mounted ext4
 //   - Source: {snapshotDir}/rw/upper/ (inside mounted ext4)
-//   - See: [commitSourceFromBlock]
 //
 // OVERLAY MODE (regular snapshots):
 //   - Condition: rwlayer.img does NOT exist
 //   - Used when: VM handles overlay internally
 //   - Source: {snapshotDir}/fs/
-//   - See: [commitSourceFromOverlay]
 //
 // # Mount Types Returned
 //
@@ -105,7 +103,6 @@
 //
 // The package defines structured error types for programmatic handling:
 //   - [LayerBlobNotFoundError]: EROFS layer blob not found for snapshot
-//   - [BlockMountError]: ext4 block mount failed during commit
 //   - [CommitConversionError]: EROFS conversion failed during commit
 //
 // Use errors.As to extract context:

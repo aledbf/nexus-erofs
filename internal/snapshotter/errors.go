@@ -23,28 +23,6 @@ func (e *LayerBlobNotFoundError) Error() string {
 		e.SnapshotID, e.Dir, strings.Join(e.Searched, ", "))
 }
 
-// BlockMountError indicates ext4 block mount failure during commit.
-// This occurs when trying to mount rwlayer.img to read the upper directory
-// contents for EROFS conversion.
-//
-// Common causes:
-//   - rwlayer.img is corrupted or incomplete
-//   - Loop device limit reached (check /proc/sys/loop/max_loop)
-//   - Mount point already in use
-type BlockMountError struct {
-	Source string
-	Target string
-	Cause  error
-}
-
-func (e *BlockMountError) Error() string {
-	return fmt.Sprintf("failed to mount ext4 block device %s at %s: %v", e.Source, e.Target, e.Cause)
-}
-
-func (e *BlockMountError) Unwrap() error {
-	return e.Cause
-}
-
 // CommitConversionError indicates EROFS conversion failure during commit.
 // This occurs when mkfs.erofs fails to convert the upper directory to EROFS format.
 //
