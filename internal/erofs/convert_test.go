@@ -77,6 +77,22 @@ func TestMountsToLayer(t *testing.T) {
 			expectError: false, // EROFS mount types are trusted without marker
 		},
 		{
+			name: "active snapshot with format/erofs and ext4",
+			mounts: []mount.Mount{
+				{Type: "format/erofs", Source: "/some/path/fsmeta.erofs", Options: []string{"ro", "loop", "device=/some/path/layer1.erofs"}},
+				{Type: "ext4", Source: "/some/path/rwlayer.img", Options: []string{"rw", "loop"}},
+			},
+			expectError: false, // EROFS mount type present, ext4 layer path extraction works
+		},
+		{
+			name: "active snapshot with erofs and ext4",
+			mounts: []mount.Mount{
+				{Type: "erofs", Source: "/some/path/layer.erofs", Options: []string{"ro", "loop"}},
+				{Type: "ext4", Source: "/some/path/rwlayer.img", Options: []string{"rw", "loop"}},
+			},
+			expectError: false, // EROFS mount type present, ext4 layer path extraction works
+		},
+		{
 			name: "overlay mount without marker",
 			mounts: []mount.Mount{
 				{Type: "overlay", Source: "overlay", Options: []string{"upperdir=/tmp/upper", "lowerdir=/tmp/lower"}},

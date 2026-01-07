@@ -303,6 +303,10 @@ func extractLayerPath(mounts []mount.Mount) (string, error) {
 		return layerFromBindMount(mnt.Source), nil
 	case "erofs":
 		return filepath.Dir(mnt.Source), nil
+	case "ext4":
+		// ext4 is the writable layer in active snapshots.
+		// The layer directory is the parent of the .img file.
+		return filepath.Dir(mnt.Source), nil
 	case "overlay":
 		return layerFromOverlay(mounts, mnt)
 	default:
