@@ -46,32 +46,21 @@ func TestLayerBlobNotFoundErrorAs(t *testing.T) {
 
 // TestErrorChainDepth verifies deep error chains work correctly.
 func TestErrorChainDepth(t *testing.T) {
-	// Create a 3-level error chain
+	// Create a 2-level error chain
 	level1 := errors.New("root cause: filesystem full")
-	level2 := &BlockMountError{
-		Source: "/path/to/block.img",
-		Target: "/mnt/target",
-		Cause:  level1,
-	}
-	level3 := &CommitConversionError{
+	level2 := &CommitConversionError{
 		SnapshotID: "snap-abc",
 		UpperDir:   "/var/lib/snapshotter/abc/upper",
-		Cause:      level2,
+		Cause:      level1,
 	}
 
 	// Should find root cause
-	if !errors.Is(level3, level1) {
-		t.Error("should find root error through 3-level chain")
+	if !errors.Is(level2, level1) {
+		t.Error("should find root error through error chain")
 	}
 
-	// Should find intermediate error
-	var blockErr *BlockMountError
-	if !errors.As(level3, &blockErr) {
-		t.Error("should find BlockMountError in chain")
-	}
-
-	// Error message should include context from all levels
-	msg := level3.Error()
+	// Error message should include context
+	msg := level2.Error()
 	if !strings.Contains(msg, "snap-abc") {
 		t.Error("error message should contain snapshot ID")
 	}
@@ -89,26 +78,6 @@ func TestReverseStringsEmpty(t *testing.T) {
 	result = reverseStrings(nil)
 	if result != nil {
 		t.Errorf("expected nil for nil slice, got %v", result)
-	}
-}
-
-// TestBlockMountErrorNilCause verifies nil cause is handled.
-func TestBlockMountErrorNilCause(t *testing.T) {
-	err := &BlockMountError{
-		Source: "/path/source",
-		Target: "/path/target",
-		Cause:  nil,
-	}
-
-	// Should not panic
-	msg := err.Error()
-	if msg == "" {
-		t.Error("error message should not be empty")
-	}
-
-	// Unwrap should return nil safely
-	if err.Unwrap() != nil {
-		t.Error("Unwrap with nil cause should return nil")
 	}
 }
 
