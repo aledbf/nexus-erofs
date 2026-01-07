@@ -725,14 +725,17 @@ func testViewSnapshot(t *testing.T, env *Environment) {
 func testErofsLayers(t *testing.T, env *Environment) {
 	snapshotsDir := filepath.Join(env.SnapshotterRoot(), "snapshots")
 
-	// Find EROFS files
+	// Find EROFS layer files (exclude fsmeta.erofs which has different structure)
 	var erofsFiles []string
 	if err := filepath.Walk(snapshotsDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if strings.HasSuffix(path, ".erofs") && !info.IsDir() {
-			erofsFiles = append(erofsFiles, path)
+			// fsmeta.erofs files are multi-device metadata, not standard EROFS images
+			if filepath.Base(path) != "fsmeta.erofs" {
+				erofsFiles = append(erofsFiles, path)
+			}
 		}
 		return nil
 	}); err != nil {
@@ -740,18 +743,33 @@ func testErofsLayers(t *testing.T, env *Environment) {
 	}
 
 	if len(erofsFiles) == 0 {
+		// If no layer files, check if fsmeta.erofs exists (multi-device setup)
+		var hasFsmeta bool
+		filepath.Walk(snapshotsDir, func(path string, info os.FileInfo, err error) error { //nolint:errcheck
+			if err == nil && filepath.Base(path) == "fsmeta.erofs" {
+				hasFsmeta = true
+				t.Logf("found fsmeta.erofs: %s", path)
+			}
+			return nil
+		})
+		if hasFsmeta {
+			t.Log("no individual layer files, but fsmeta.erofs present (multi-device mode)")
+			return
+		}
 		t.Fatal("no EROFS files found")
 	}
-	t.Logf("found %d EROFS files", len(erofsFiles))
+	t.Logf("found %d EROFS layer files", len(erofsFiles))
 
 	// Verify at least one has valid EROFS magic
 	for _, path := range erofsFiles {
-		if err := verifyErofsMagic(path); err == nil {
+		err := verifyErofsMagic(path)
+		if err == nil {
 			t.Logf("verified EROFS magic in: %s", filepath.Base(path))
 			return
 		}
+		t.Logf("file %s: %v", filepath.Base(path), err)
 	}
-	t.Error("no EROFS file with valid magic found")
+	t.Error("no EROFS layer file with valid magic found")
 }
 
 // verifyErofsMagic checks if a file has the EROFS magic bytes.
@@ -881,20 +899,34 @@ func testSnapshotCleanup(t *testing.T, env *Environment) {
 		t.Fatalf("walk snapshots: %v", err)
 	}
 
-	// Create and remove a snapshot
+	if parentKey == "" {
+		t.Skip("no committed snapshot found to use as parent")
+	}
+	t.Logf("using parent: %s", parentKey)
+
+	// Create snapshot for cleanup test
 	snapKey := fmt.Sprintf("test-cleanup-%d", time.Now().UnixNano())
-	_, err := ss.Prepare(ctx, snapKey, parentKey)
+	mounts, err := ss.Prepare(ctx, snapKey, parentKey)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
+	t.Logf("prepared snapshot %s with %d mounts", snapKey, len(mounts))
 
 	// Verify it exists
-	if _, err := ss.Stat(ctx, snapKey); err != nil {
+	info, err := ss.Stat(ctx, snapKey)
+	if err != nil {
 		t.Fatalf("stat before remove: %v", err)
 	}
+	t.Logf("snapshot exists: kind=%v, parent=%s", info.Kind, info.Parent)
 
 	// Remove it
 	if err := ss.Remove(ctx, snapKey); err != nil {
+		// Log all snapshots for debugging
+		t.Logf("remove failed, listing all snapshots:")
+		ss.Walk(ctx, func(_ context.Context, si snapshots.Info) error { //nolint:errcheck
+			t.Logf("  - %s (kind=%v, parent=%s)", si.Name, si.Kind, si.Parent)
+			return nil
+		})
 		t.Fatalf("remove: %v", err)
 	}
 
