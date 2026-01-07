@@ -397,8 +397,10 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 		rwMount := s.blockRwMountPath(id)
 		if unmountErr := unmountAll(rwMount); unmountErr != nil {
 			log.G(ctx).WithError(unmountErr).WithField("id", id).Warn("failed to cleanup ext4 mount after commit")
+			// Don't clear mount state if unmount failed - state should reflect reality
+		} else {
+			s.mountTracker.SetUnmounted(id)
 		}
-		s.mountTracker.SetUnmounted(id)
 	}
 
 	return nil

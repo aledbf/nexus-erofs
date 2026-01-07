@@ -259,9 +259,11 @@ func (s *snapshotter) cleanupAfterRemove(ctx context.Context, id string, removal
 	// Cleanup block rw mount (only exists if commit was in progress)
 	if err := unmountAll(s.blockRwMountPath(id)); err != nil {
 		log.G(ctx).WithError(err).WithField("id", id).Warnf("failed to cleanup block rw mount")
+		// Don't clear mount state if unmount failed - state should reflect reality
+	} else {
+		// Clear mount state tracking only if unmount succeeded
+		s.mountTracker.SetUnmounted(id)
 	}
-	// Clear mount state tracking
-	s.mountTracker.SetUnmounted(id)
 
 	for _, dir := range removals {
 		if err := os.RemoveAll(dir); err != nil {
