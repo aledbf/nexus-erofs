@@ -12,7 +12,6 @@ import (
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/snapshots/storage"
 	"github.com/containerd/continuity/fs"
-	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	"github.com/moby/sys/mountinfo"
 	"github.com/opencontainers/go-digest"
@@ -21,159 +20,263 @@ import (
 	"github.com/aledbf/nexus-erofs/internal/fsverity"
 )
 
-// commitBlock handles the conversion of a writable layer to EROFS.
-// It supports both block mode (ext4 image) and directory mode (overlay upper).
-func (s *snapshotter) commitBlock(ctx context.Context, layerBlob string, id string) error {
-	layer := s.writablePath(id)
-	if _, err := os.Stat(layer); err != nil {
+// commitSource represents the source directory for EROFS conversion.
+// It abstracts the difference between block mode (ext4 mounted) and
+// directory mode (overlay upper).
+type commitSource struct {
+	// upperDir is the path containing files to convert to EROFS.
+	upperDir string
+
+	// cleanup is called after conversion to release resources (e.g., unmount).
+	cleanup func()
+
+	// mode describes the source for logging/debugging.
+	mode string
+}
+
+// resolveCommitSource determines where to read upper directory contents from.
+//
+// WHY TWO MODES EXIST:
+//   - Block mode (extract snapshots): ext4 image mounted on host so differs can write.
+//     The upper directory is inside the mounted ext4 at rw/upper/.
+//   - Directory mode (regular snapshots): VM handles overlay, no host mount needed.
+//     The upper directory is directly at fs/.
+//
+// This function returns the appropriate path and a cleanup function.
+func (s *snapshotter) resolveCommitSource(ctx context.Context, id string) (*commitSource, error) {
+	rwLayer := s.writablePath(id)
+
+	// Check if block layer exists (rwlayer.img)
+	if _, err := os.Stat(rwLayer); err != nil {
 		if os.IsNotExist(err) {
-			// No block layer - convert directory mode upper
-			upperDir := s.upperPath(id)
-			if cerr := convertDirToErofs(ctx, layerBlob, upperDir); cerr != nil {
-				return fmt.Errorf("convert upper to erofs layer: %w", cerr)
-			}
-			return nil
+			// Directory mode: no block layer, use overlay upper directly
+			return s.commitSourceFromOverlay(ctx, id)
 		}
-		return fmt.Errorf("access writable layer %s: %w", layer, err)
+		return nil, fmt.Errorf("access writable layer %s: %w", rwLayer, err)
 	}
 
-	// Block mode: use the rw mount path
+	// Block mode: need to mount/access the ext4 image
+	return s.commitSourceFromBlock(ctx, id, rwLayer)
+}
+
+// commitSourceFromOverlay returns the commit source for directory mode.
+// This is the simple case where the overlay upper is directly accessible.
+func (s *snapshotter) commitSourceFromOverlay(ctx context.Context, id string) (*commitSource, error) {
+	upperDir := s.upperPath(id)
+
+	log.G(ctx).WithField("upper", upperDir).Debug("using overlay directory mode for commit")
+
+	return &commitSource{
+		upperDir: upperDir,
+		cleanup:  func() {}, // No cleanup needed
+		mode:     "overlay",
+	}, nil
+}
+
+// commitSourceFromBlock returns the commit source for block mode.
+// This handles the case where an ext4 image needs to be mounted.
+//
+// WHY MOUNT CHECK:
+// Extract snapshots mount ext4 during Prepare() so differs can write.
+// For those, the mount already exists. For crash recovery or other cases,
+// we may need to mount read-only to access the contents.
+func (s *snapshotter) commitSourceFromBlock(ctx context.Context, id, rwLayer string) (*commitSource, error) {
 	rwMount := s.blockRwMountPath(id)
 
-	// Check if already mounted (from Prepare/Mounts) before trying to mount again.
-	// For VM-only snapshots, the /rw directory may not exist (VM mounts ext4, not host).
+	// Check if already mounted (from Prepare for extract snapshots)
 	alreadyMounted := false
 	if _, err := os.Stat(rwMount); err == nil {
-		alreadyMounted, err = mountinfo.Mounted(rwMount)
-		if err != nil {
-			return fmt.Errorf("check mount status: %w", err)
+		var mountErr error
+		alreadyMounted, mountErr = mountinfo.Mounted(rwMount)
+		if mountErr != nil {
+			return nil, fmt.Errorf("check mount status: %w", mountErr)
 		}
 	}
+
+	needsUnmount := false
 	if !alreadyMounted {
 		// Mount read-only for commit (we're just reading the upper contents)
-		if err := os.MkdirAll(rwMount, 0755); err != nil {
-			return fmt.Errorf("create rw mount point: %w", err)
+		if err := s.mountBlockReadOnly(ctx, rwLayer, rwMount); err != nil {
+			return nil, err
 		}
-		m := mount.Mount{
-			Source:  layer,
-			Type:    "ext4",
-			Options: []string{"ro", "loop", "noload"},
-		}
-		if err := m.Mount(rwMount); err != nil {
-			return fmt.Errorf("mount writable layer %s: %w", layer, err)
-		}
-		log.G(ctx).WithField("target", rwMount).Debug("Mounted writable layer for conversion")
+		needsUnmount = true
+		log.G(ctx).WithField("target", rwMount).Debug("mounted block layer read-only for commit")
 	}
 
-	// Cleanup the block rw mount after conversion
-	defer func() {
-		if err := unmountAll(rwMount); err != nil {
-			log.G(ctx).WithError(err).WithField("id", id).Warn("failed to cleanup block rw mount after conversion")
-		}
-	}()
-
-	// Convert the upper directory inside the mounted ext4
+	// Determine upper directory inside the mounted ext4
 	upperDir := s.blockUpperPath(id)
 	if _, err := os.Stat(upperDir); os.IsNotExist(err) {
-		// upper is empty, convert empty directory
+		// Upper directory doesn't exist inside ext4 - use mount root
+		// This happens when the overlay had no changes
 		upperDir = rwMount
 	}
-	if cerr := convertDirToErofs(ctx, layerBlob, upperDir); cerr != nil {
-		return fmt.Errorf("convert upper block to erofs layer: %w", cerr)
+
+	cleanup := func() {
+		if needsUnmount {
+			if err := unmountAll(rwMount); err != nil {
+				log.G(ctx).WithError(err).WithField("id", id).Warn("failed to cleanup block mount after commit")
+			}
+		}
 	}
+
+	return &commitSource{
+		upperDir: upperDir,
+		cleanup:  cleanup,
+		mode:     "block",
+	}, nil
+}
+
+// mountBlockReadOnly mounts an ext4 image read-only for reading upper contents.
+func (s *snapshotter) mountBlockReadOnly(ctx context.Context, source, target string) error {
+	if err := os.MkdirAll(target, 0755); err != nil {
+		return fmt.Errorf("create mount point: %w", err)
+	}
+
+	m := mount.Mount{
+		Source:  source,
+		Type:    "ext4",
+		Options: []string{"ro", "loop", "noload"},
+	}
+
+	if err := m.Mount(target); err != nil {
+		return &BlockMountError{
+			Source: source,
+			Target: target,
+			Cause:  err,
+		}
+	}
+
+	return nil
+}
+
+// commitBlock handles the conversion of a writable layer to EROFS.
+// It determines the appropriate source (block or overlay) and performs conversion.
+func (s *snapshotter) commitBlock(ctx context.Context, layerBlob string, id string) error {
+	source, err := s.resolveCommitSource(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer source.cleanup()
+
+	log.G(ctx).WithFields(log.Fields{
+		"id":    id,
+		"mode":  source.mode,
+		"upper": source.upperDir,
+	}).Debug("converting upper directory to EROFS")
+
+	if err := convertDirToErofs(ctx, layerBlob, source.upperDir); err != nil {
+		return &CommitConversionError{
+			SnapshotID: id,
+			UpperDir:   source.upperDir,
+			Cause:      err,
+		}
+	}
+
 	return nil
 }
 
 // generateFsMeta creates a merged fsmeta.erofs and VMDK descriptor for VM runtimes.
 // The VMDK allows QEMU to present all EROFS layers as a single concatenated block device.
-// This is always called when there are parent layers (no threshold - VM runtimes need this).
 //
-// Layer ordering:
+// WHY ASYNC: fsmeta generation is expensive (mkfs.erofs subprocess) but not required
+// for basic snapshot operations. Running async keeps Prepare/View fast.
 //
-// OCI Image Manifest specifies layers in bottom-to-top order (base layer at index 0):
-// https://github.com/opencontainers/image-spec/blob/main/manifest.md
-// > "The array MUST have the base layer at index 0. Subsequent layers MUST then
-// > follow in stack order (i.e. from layers[0] to layers[len(layers)-1])."
+// WHY PLACEHOLDER: Multiple goroutines may try to generate fsmeta for the same parent
+// chain. The placeholder file (O_EXCL) ensures only one wins. Others exit silently -
+// the winner's result will be used.
 //
-// mkfs.erofs rebuild mode expects layers in OCI manifest order (base/oldest first):
-// https://man.archlinux.org/man/extra/erofs-utils/mkfs.erofs.1.en
-// > "To merge these layers: mkfs.erofs merged.erofs layer0.erofs ... layerN-1.erofs"
+// WHY SILENT FAILURE: If fsmeta generation fails, callers fall back to individual
+// layer mounts. This is slightly slower but functionally correct. The placeholder
+// is removed on failure, allowing retry on next access.
 //
-// The snapIDs slice comes in newest-first order (from snapshot chain walk).
-// We must REVERSE it to get oldest-first order for mkfs.erofs.
-//
-// VMDK layer order = OCI manifest order (after fsmeta):
-// - VMDK: [fsmeta, layer_0, layer_1, ..., layer_n] (oldest to newest)
-// - OCI:  [layer_0, layer_1, ..., layer_n]         (oldest to newest)
-func (s *snapshotter) generateFsMeta(ctx context.Context, snapIDs []string) {
-	var blobs []string
-
-	if len(snapIDs) == 0 {
+// LAYER ORDERING:
+// The parentIDs parameter uses snapshot chain order (newest-first).
+// We convert to OCI manifest order (oldest-first) for mkfs.erofs.
+// See layer_order.go for the LayerSequence type that makes this explicit.
+func (s *snapshotter) generateFsMeta(ctx context.Context, parentIDs LayerSequence) {
+	if parentIDs.IsEmpty() {
 		return
+	}
+
+	// Validate input ordering - we expect newest-first from snapshot chain
+	if parentIDs.Order != OrderNewestFirst {
+		log.G(ctx).Warn("generateFsMeta received unexpected layer order, expected newest-first")
 	}
 
 	t1 := time.Now()
-	mergedMeta := s.fsMetaPath(snapIDs[0])
-	vmdkFile := s.vmdkPath(snapIDs[0])
 
-	// If the empty placeholder cannot be created (mainly due to os.IsExist), just return
+	// Use the newest snapshot's directory for output files
+	newestID := parentIDs.IDs[0]
+	mergedMeta := s.fsMetaPath(newestID)
+	vmdkFile := s.vmdkPath(newestID)
+
+	// Atomic placeholder creation - only one goroutine wins
 	if _, err := os.OpenFile(mergedMeta, os.O_CREATE|os.O_EXCL, 0600); err != nil {
+		// Another goroutine is generating or already generated - exit silently
 		return
 	}
 
-	// Cleanup on failure
+	// Track success for cleanup
+	var blobs []string
+
+	// Cleanup placeholder on failure
 	defer func() {
 		if blobs == nil {
-			// Generation failed, remove placeholder
 			_ = os.Remove(mergedMeta)
 			_ = os.Remove(vmdkFile)
 		}
 	}()
 
-	// Collect blobs by iterating backwards through snapIDs (newest-first input).
-	// This produces oldest-first order matching containerd's approach.
-	// See: https://github.com/containerd/containerd/pull/12374
-	for i := len(snapIDs) - 1; i >= 0; i-- {
-		blob, err := s.findLayerBlob(snapIDs[i])
+	// Convert to oldest-first order for mkfs.erofs
+	ociOrder := parentIDs.ToOldestFirst()
+
+	log.G(ctx).WithFields(log.Fields{
+		"layers":     ociOrder.Len(),
+		"inputOrder": parentIDs.Order,
+		"erofsOrder": ociOrder.Order,
+	}).Debug("collecting layer blobs for fsmeta generation")
+
+	// Collect layer blob paths in OCI order
+	for _, snapID := range ociOrder.IDs {
+		blob, err := s.findLayerBlob(snapID)
 		if err != nil {
+			log.G(ctx).WithError(err).WithField("snapshot", snapID).Debug("layer blob not found, skipping fsmeta")
 			blobs = nil // Signal failure
 			return
 		}
 		blobs = append(blobs, blob)
 	}
 
-	// Check if all layers have block sizes compatible with fsmeta merge.
+	// Check block size compatibility for fsmeta merge
 	if !erofs.CanMergeFsmeta(blobs) {
-		log.G(ctx).Debugf("skipping fsmeta generation: one or more layers have incompatible block size")
-		blobs = nil // Signal skip (cleanup placeholder)
+		log.G(ctx).Debug("skipping fsmeta generation: incompatible block sizes")
+		blobs = nil
 		return
 	}
 
-	// Use rebuild mode to generate flatdev fsmeta with mapped_blkaddr.
-	// The --vmdk-desc option generates both fsmeta and VMDK descriptor in one step.
-	// IMPORTANT: We use final paths (not temp) because mkfs.erofs embeds the fsmeta
-	// path into the VMDK descriptor. Using temp paths would cause QEMU to fail.
+	// Generate fsmeta and VMDK in one mkfs.erofs call
+	// IMPORTANT: Use final paths because mkfs.erofs embeds them in the VMDK
 	args := append([]string{"--quiet", "--vmdk-desc=" + vmdkFile, mergedMeta}, blobs...)
-	log.G(ctx).Infof("merging layers with mkfs.erofs %v", args)
+	log.G(ctx).Debugf("running mkfs.erofs with args: %v", args)
+
 	cmd := exec.CommandContext(ctx, "mkfs.erofs", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		log.G(ctx).Warnf("failed to generate merged fsmeta for %v: %q: %v", snapIDs[0], string(out), err)
-		blobs = nil // Signal failure
+		log.G(ctx).WithError(err).Warnf("fsmeta generation failed: %s", string(out))
+		blobs = nil
 		return
 	}
 
-	// Write layer manifest file with digests in VMDK/OCI order (oldest-to-newest).
-	// This allows external tools to verify VMDK layer order without parsing the snapshot chain.
-	manifestFile := s.manifestPath(snapIDs[0])
+	// Write layer manifest for external verification
+	manifestFile := s.manifestPath(newestID)
 	if err := s.writeLayerManifest(manifestFile, blobs); err != nil {
-		log.G(ctx).WithError(err).Warn("failed to write layer manifest")
-		// Non-fatal - continue even if manifest fails
+		log.G(ctx).WithError(err).Warn("failed to write layer manifest (non-fatal)")
 	}
 
 	log.G(ctx).WithFields(log.Fields{
-		"d": time.Since(t1),
-	}).Infof("merged fsmeta and vmdk for %v generated", snapIDs[0])
+		"duration": time.Since(t1),
+		"layers":   len(blobs),
+	}).Info("fsmeta and VMDK generated successfully")
 }
 
 // writeLayerManifest writes layer digests to a manifest file in VMDK/OCI order.
@@ -203,12 +306,20 @@ func (s *snapshotter) writeLayerManifest(manifestFile string, blobs []string) er
 }
 
 // Commit finalizes an active snapshot, converting it to EROFS format.
+//
+// The commit process:
+// 1. Find or create the EROFS layer blob
+// 2. Enable fs-verity if configured (integrity protection)
+// 3. Set immutable flag if configured (accidental deletion protection)
+// 4. Update metadata to mark snapshot as committed
+//
+// If no layer blob exists (EROFS differ hasn't processed it), we fall back
+// to converting the upper directory ourselves using the fallback naming scheme.
 func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snapshots.Opt) error {
 	var layerBlob string
 	var id string
 
-	// Apply the overlayfs upperdir (generated by non-EROFS differs) into a EROFS blob
-	// in a read transaction first since conversion could be slow.
+	// Get snapshot ID in a read transaction (conversion can be slow)
 	err := s.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
 		sid, _, _, err := storage.GetInfo(ctx, key)
 		if err != nil {
@@ -221,47 +332,61 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 		return err
 	}
 
-	// If the layer blob doesn't exist, which means this layer wasn't applied by
-	// the EROFS differ (possibly the walking differ), convert the upperdir instead.
-	// Use fallback naming since we don't have the original layer digest.
+	log.G(ctx).WithFields(log.Fields{
+		"name": name,
+		"key":  key,
+		"id":   id,
+	}).Debug("starting commit")
+
+	// Find existing layer blob or create via fallback
 	layerBlob, err = s.findLayerBlob(id)
 	if err != nil {
-		// Layer doesn't exist - create it using fallback path
+		// Layer doesn't exist - EROFS differ hasn't processed this layer.
+		// Fall back to converting the upper directory ourselves.
+		log.G(ctx).WithField("id", id).Debug("layer blob not found, using fallback conversion")
+
 		layerBlob = s.fallbackLayerBlobPath(id)
 		if cerr := s.commitBlock(ctx, layerBlob, id); cerr != nil {
-			if errdefs.IsNotImplemented(cerr) {
-				return fmt.Errorf("layer blob not found and fallback failed: %w", err)
-			}
-			return cerr
+			return fmt.Errorf("fallback conversion failed: %w", cerr)
 		}
 	}
 
-	// Enable fsverity on the EROFS layer if configured
+	// Enable fs-verity for integrity protection
 	if s.enableFsverity {
 		if err := fsverity.Enable(layerBlob); err != nil {
 			return fmt.Errorf("enable fsverity: %w", err)
 		}
+		log.G(ctx).WithField("blob", layerBlob).Debug("fs-verity enabled")
 	}
 
-	// Set IMMUTABLE_FL on the EROFS layer to avoid artificial data loss
+	// Set immutable flag to prevent accidental deletion
 	if s.setImmutable {
 		if err := setImmutable(layerBlob, true); err != nil {
-			log.G(ctx).WithError(err).Warnf("failed to set IMMUTABLE_FL for %s", layerBlob)
+			log.G(ctx).WithError(err).Warn("failed to set immutable flag (non-fatal)")
 		}
 	}
 
+	// Commit to metadata in a write transaction
 	return s.ms.WithTransaction(ctx, true, func(ctx context.Context) error {
 		if _, err := os.Stat(layerBlob); err != nil {
-			return fmt.Errorf("get converted erofs blob: %w", err)
+			return fmt.Errorf("verify layer blob: %w", err)
 		}
 
 		usage, err := fs.DiskUsage(ctx, layerBlob)
 		if err != nil {
-			return fmt.Errorf("calculate disk usage for %q: %w", layerBlob, err)
+			return fmt.Errorf("calculate disk usage: %w", err)
 		}
+
 		if _, err = storage.CommitActive(ctx, key, name, snapshots.Usage(usage), opts...); err != nil {
-			return fmt.Errorf("commit snapshot %s: %w", key, err)
+			return fmt.Errorf("commit snapshot: %w", err)
 		}
+
+		log.G(ctx).WithFields(log.Fields{
+			"name":  name,
+			"blob":  layerBlob,
+			"bytes": usage.Size,
+		}).Info("snapshot committed")
+
 		return nil
 	})
 }

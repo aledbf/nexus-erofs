@@ -115,8 +115,9 @@ func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 	}
 
 	// Generate VMDK for VM runtimes - always generate when there are parent layers.
+	// ParentIDs come from the snapshot chain in newest-first order.
 	if !isExtractKey(key) && len(snap.ParentIDs) > 0 {
-		s.generateFsMeta(ctx, snap.ParentIDs)
+		s.generateFsMeta(ctx, NewNewestFirst(snap.ParentIDs))
 	}
 
 	// For active snapshots, create the writable ext4 layer file.

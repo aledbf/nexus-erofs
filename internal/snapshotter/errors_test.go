@@ -1,0 +1,164 @@
+package snapshotter
+
+import (
+	"errors"
+	"testing"
+)
+
+func TestLayerBlobNotFoundError(t *testing.T) {
+	err := &LayerBlobNotFoundError{
+		SnapshotID: "snap-123",
+		Dir:        "/var/lib/snapshots/123",
+		Searched:   []string{"sha256-*.erofs", "snapshot-*.erofs"},
+	}
+
+	// Test error message
+	msg := err.Error()
+	if msg == "" {
+		t.Error("error message should not be empty")
+	}
+	if !errContains(msg, "snap-123") {
+		t.Errorf("error message should contain snapshot ID: %s", msg)
+	}
+	if !errContains(msg, "sha256-*.erofs") {
+		t.Errorf("error message should contain searched patterns: %s", msg)
+	}
+
+	// Test errors.Is
+	var target *LayerBlobNotFoundError
+	if !errors.Is(err, target) {
+		t.Error("errors.Is should match LayerBlobNotFoundError")
+	}
+
+	// Test errors.Is with different error type
+	var otherTarget *BlockMountError
+	if errors.Is(err, otherTarget) {
+		t.Error("errors.Is should not match different error type")
+	}
+}
+
+func TestBlockMountError(t *testing.T) {
+	cause := errors.New("permission denied")
+	err := &BlockMountError{
+		Source: "/var/lib/snapshots/123/rwlayer.img",
+		Target: "/var/lib/snapshots/123/rw",
+		Cause:  cause,
+	}
+
+	// Test error message
+	msg := err.Error()
+	if !errContains(msg, "rwlayer.img") {
+		t.Errorf("error message should contain source: %s", msg)
+	}
+	if !errContains(msg, "rw") {
+		t.Errorf("error message should contain target: %s", msg)
+	}
+
+	// Test Unwrap
+	if err.Unwrap() != cause {
+		t.Error("Unwrap should return the cause")
+	}
+
+	// Test errors.Is with cause
+	if !errors.Is(err, cause) {
+		t.Error("errors.Is should match wrapped cause")
+	}
+}
+
+func TestFsmetaGenerationError(t *testing.T) {
+	cause := errors.New("mkfs.erofs failed")
+	err := &FsmetaGenerationError{
+		SnapshotID: "snap-456",
+		LayerCount: 5,
+		Cause:      cause,
+	}
+
+	// Test error message
+	msg := err.Error()
+	if !errContains(msg, "snap-456") {
+		t.Errorf("error message should contain snapshot ID: %s", msg)
+	}
+	if !errContains(msg, "5 layers") {
+		t.Errorf("error message should contain layer count: %s", msg)
+	}
+
+	// Test Unwrap
+	if err.Unwrap() != cause {
+		t.Error("Unwrap should return the cause")
+	}
+}
+
+func TestCommitConversionError(t *testing.T) {
+	cause := errors.New("no space left on device")
+	err := &CommitConversionError{
+		SnapshotID: "snap-789",
+		UpperDir:   "/var/lib/snapshots/789/fs",
+		Cause:      cause,
+	}
+
+	// Test error message
+	msg := err.Error()
+	if !errContains(msg, "snap-789") {
+		t.Errorf("error message should contain snapshot ID: %s", msg)
+	}
+	if !errContains(msg, "fs") {
+		t.Errorf("error message should contain upper dir: %s", msg)
+	}
+
+	// Test Unwrap
+	if err.Unwrap() != cause {
+		t.Error("Unwrap should return the cause")
+	}
+}
+
+func TestIncompatibleBlockSizeError(t *testing.T) {
+	err := &IncompatibleBlockSizeError{
+		LayerCount: 3,
+		Details:    "block sizes vary from 512 to 4096",
+	}
+
+	// Test error message
+	msg := err.Error()
+	if !errContains(msg, "3 layers") {
+		t.Errorf("error message should contain layer count: %s", msg)
+	}
+	if !errContains(msg, "block sizes") {
+		t.Errorf("error message should contain details: %s", msg)
+	}
+}
+
+func TestErrorWrapping(t *testing.T) {
+	// Test deep error wrapping
+	rootCause := errors.New("disk full")
+	blockErr := &BlockMountError{
+		Source: "/path/to/img",
+		Target: "/path/to/mount",
+		Cause:  rootCause,
+	}
+	commitErr := &CommitConversionError{
+		SnapshotID: "snap-1",
+		UpperDir:   "/path/to/upper",
+		Cause:      blockErr,
+	}
+
+	// Should be able to find root cause through chain
+	if !errors.Is(commitErr, rootCause) {
+		t.Error("should find root cause through error chain")
+	}
+
+	// Should be able to find block error in chain
+	var blockTarget *BlockMountError
+	if !errors.As(commitErr, &blockTarget) {
+		t.Error("should find BlockMountError in error chain")
+	}
+}
+
+// errContains checks if s contains substr (simple helper to avoid strings import)
+func errContains(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
