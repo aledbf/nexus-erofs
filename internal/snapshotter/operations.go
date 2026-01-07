@@ -285,7 +285,8 @@ func (s *snapshotter) cleanupAfterRemove(ctx context.Context, id string, removal
 }
 
 // Cleanup removes unreferenced snapshot directories.
-func (s *snapshotter) Cleanup(ctx context.Context) (err error) {
+// Errors are logged but don't stop cleanup (best-effort).
+func (s *snapshotter) Cleanup(ctx context.Context) error {
 	var removals []string
 	if err := s.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
 		var err error
@@ -295,40 +296,38 @@ func (s *snapshotter) Cleanup(ctx context.Context) (err error) {
 		return err
 	}
 
-	var cleanupErrs []error
 	for _, dir := range removals {
 		// Cleanup block rw mount
 		if err := unmountAll(filepath.Join(dir, rwDirName)); err != nil {
 			log.G(ctx).WithError(err).WithField("path", dir).Debug("failed to cleanup block rw mount")
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("cleanup rw %s: %w", dir, err))
 		}
-		// Clear immutable flag on any layer blobs (digest-based or fallback naming)
-		if matches, err := filepath.Glob(filepath.Join(dir, erofs.LayerBlobPattern)); err == nil {
-			for _, match := range matches {
-				if err := setImmutable(match, false); err != nil && !errdefs.IsNotImplemented(err) {
-					log.G(ctx).WithError(err).WithField("path", match).Debug("failed to clear immutable flag")
-				}
-			}
-		}
-		// Also try fallback naming pattern
-		if matches, err := filepath.Glob(filepath.Join(dir, "snapshot-*.erofs")); err == nil {
-			for _, match := range matches {
-				if err := setImmutable(match, false); err != nil && !errdefs.IsNotImplemented(err) {
-					log.G(ctx).WithError(err).WithField("path", match).Debug("failed to clear immutable flag")
-				}
-			}
-		}
+
+		// Clear immutable flag on any EROFS blobs before removal
+		clearImmutableFlags(ctx, dir)
+
 		if err := os.RemoveAll(dir); err != nil {
 			log.G(ctx).WithError(err).WithField("path", dir).Warn("failed to remove directory")
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove %s: %w", dir, err))
 		}
 	}
 
-	if len(cleanupErrs) > 0 {
-		log.G(ctx).WithField("error_count", len(cleanupErrs)).Warn("cleanup completed with errors")
-		return fmt.Errorf("cleanup had %d errors, first: %w", len(cleanupErrs), cleanupErrs[0])
-	}
 	return nil
+}
+
+// clearImmutableFlags clears the immutable flag on all EROFS blobs in a directory.
+// Searches both digest-based (sha256-*.erofs) and fallback (snapshot-*.erofs) patterns.
+func clearImmutableFlags(ctx context.Context, dir string) {
+	patterns := []string{erofs.LayerBlobPattern, "snapshot-*.erofs"}
+	for _, pattern := range patterns {
+		matches, err := filepath.Glob(filepath.Join(dir, pattern))
+		if err != nil {
+			continue
+		}
+		for _, match := range matches {
+			if err := setImmutable(match, false); err != nil && !errdefs.IsNotImplemented(err) {
+				log.G(ctx).WithError(err).WithField("path", match).Debug("failed to clear immutable flag")
+			}
+		}
+	}
 }
 
 // Stat returns information about a snapshot.
