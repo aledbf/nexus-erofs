@@ -39,7 +39,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # Default to published image on ghcr.io
 # Get repo name from git remote or use fallback
-REPO_NAME=$(git -C "${ROOT_DIR}" remote get-url origin 2>/dev/null | sed -E 's|.*github.com[:/]||; s|\.git$||' || echo "aledbf/erofs")
+REPO_NAME=$(git -C "${ROOT_DIR}" remote get-url origin 2>/dev/null | sed -E 's|.*github.com[:/]||; s|\.git$||' || echo "spin-stack/erofs-snapshotter")
 GHCR_IMAGE="ghcr.io/${REPO_NAME}/integration:latest"
 LOCAL_IMAGE="erofs-integration"
 

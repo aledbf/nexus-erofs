@@ -44,7 +44,7 @@ RUN /tmp/build-erofs-utils.sh /usr/local
 FROM ubuntu:${UBUNTU_VERSION}
 
 # OCI labels for GitHub Container Registry
-LABEL org.opencontainers.image.source=https://github.com/aledbf/erofs
+LABEL org.opencontainers.image.source=https://github.com/spin-stack/erofs-snapshotter
 LABEL org.opencontainers.image.description="Integration test environment for erofs snapshotter"
 LABEL org.opencontainers.image.licenses=Apache-2.0
 

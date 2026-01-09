@@ -1,7 +1,7 @@
 # EROFS Snapshotter
 
-[![CI](https://github.com/aledbf/erofs/actions/workflows/ci.yml/badge.svg)](https://github.com/aledbf/erofs/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/github/aledbf/erofs/graph/badge.svg?token=WLFBVZ0DSM)](https://codecov.io/github/aledbf/erofs)
+[![CI](https://github.com/spin-stack/erofs-snapshotter/actions/workflows/ci.yml/badge.svg)](https://github.com/spin-stack/erofs-snapshotter/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/github/spin-stack/erofs-snapshotter/graph/badge.svg?token=WLFBVZ0DSM)](https://codecov.io/github/spin-stack/erofs-snapshotter)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 A containerd snapshotter that converts OCI image layers to EROFS and returns raw file paths for VM-based container runtimes.
