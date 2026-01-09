@@ -1589,7 +1589,7 @@ test_nerdctl() {
 
     if ! /usr/local/bin/integration-commit \
         -address "${CONTAINERD_SOCKET}" \
-        -snapshotter erofs \
+        -snapshotter spin-erofs \
         -source "${TEST_IMAGE}" \
         -target "$new_image" \
         -marker "/root/integration-test-marker.txt" 2>&1; then
