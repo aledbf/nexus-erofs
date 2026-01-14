@@ -22,7 +22,7 @@ import (
 
 func main() {
 	var (
-		address       = flag.String("address", "/run/containerd/containerd.sock", "containerd socket")
+		address       = flag.String("address", "/var/run/spin-stack/containerd.sock", "containerd socket")
 		namespace     = flag.String("namespace", "default", "containerd namespace")
 		snapshotterNm = flag.String("snapshotter", "spin-erofs", "snapshotter name")
 		sourceImage   = flag.String("source", "ghcr.io/containerd/alpine:3.14.0", "source image")

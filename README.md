@@ -58,8 +58,8 @@ A containerd snapshotter that converts OCI image layers to EROFS and returns raw
 # 1. Start the snapshotter
 sudo spin-erofs-snapshotter \
   --root /var/lib/spin-stack/erofs-snapshotter \
-  --address /run/spin-stack/erofs-snapshotter/snapshotter.sock \
-  --containerd-address /run/containerd/containerd.sock
+  --address /run/spin-stack/erofs-snapshotter.sock \
+  --containerd-address /var/run/spin-stack/containerd.sock
 
 # 2. Pull an image using the snapshotter
 ctr images pull --snapshotter spin-erofs docker.io/library/alpine:latest
@@ -312,8 +312,8 @@ task build-linux
 ```bash
 sudo ./bin/spin-erofs-snapshotter \
   --root /var/lib/spin-stack/erofs-snapshotter \
-  --address /run/spin-stack/erofs-snapshotter/snapshotter.sock \
-  --containerd-address /run/containerd/containerd.sock
+  --address /run/spin-stack/erofs-snapshotter.sock \
+  --containerd-address /var/run/spin-stack/containerd.sock
 ```
 
 ## Configuration
@@ -330,13 +330,13 @@ version = 2
 [proxy_plugins]
   [proxy_plugins.spin-erofs]
     type = "snapshot"
-    address = "/run/spin-stack/erofs-snapshotter/snapshotter.sock"
+    address = "/run/spin-stack/erofs-snapshotter.sock"
     # Enable parallel layer unpacking (requires containerd 2.0+)
     capabilities = ["rebase"]
 
   [proxy_plugins.spin-erofs-diff]
     type = "diff"
-    address = "/run/spin-stack/erofs-snapshotter/snapshotter.sock"
+    address = "/run/spin-stack/erofs-snapshotter.sock"
 
 [plugins]
   # Configure diff service to use spin-erofs-diff (with walking as fallback)
@@ -370,8 +370,8 @@ version = 2
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--root` | `/var/lib/spin-stack/erofs-snapshotter` | Root directory for snapshotter data |
-| `--address` | `/run/spin-stack/erofs-snapshotter/snapshotter.sock` | Unix socket address |
-| `--containerd-address` | `/run/containerd/containerd.sock` | containerd socket |
+| `--address` | `/run/spin-stack/erofs-snapshotter.sock` | Unix socket address |
+| `--containerd-address` | `/var/run/spin-stack/containerd.sock` | containerd socket |
 | `--containerd-namespace` | `default` | containerd namespace to use |
 | `--log-level` | `info` | Log level (debug, info, warn, error) |
 | `--default-size` | `64M` | Size of ext4 writable layer (bytes) |

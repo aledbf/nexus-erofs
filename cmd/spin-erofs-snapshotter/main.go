@@ -53,9 +53,9 @@ var (
 )
 
 const (
-	defaultAddress          = "/run/spin-stack/erofs-snapshotter/snapshotter.sock"
+	defaultAddress          = "/run/spin-stack/erofs-snapshotter.sock"
 	defaultRoot             = "/var/lib/spin-stack/erofs-snapshotter"
-	defaultContainerdSocket = "/run/containerd/containerd.sock"
+	defaultContainerdSocket = "/var/run/spin-stack/containerd.sock"
 )
 
 func main() {

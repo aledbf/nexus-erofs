@@ -22,8 +22,8 @@ set -euo pipefail
 
 CONTAINERD_ROOT="/var/lib/containerd-test"
 SNAPSHOTTER_ROOT="/var/lib/spin-stack/erofs-snapshotter"
-CONTAINERD_SOCKET="/run/containerd/containerd.sock"
-SNAPSHOTTER_SOCKET="/run/spin-stack/erofs-snapshotter/snapshotter.sock"
+CONTAINERD_SOCKET="/var/run/spin-stack/containerd.sock"
+SNAPSHOTTER_SOCKET="/run/spin-stack/erofs-snapshotter.sock"
 LOG_DIR="/tmp/integration-logs"
 
 # Use ghcr.io or quay.io to avoid Docker Hub rate limits
