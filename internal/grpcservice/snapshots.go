@@ -60,10 +60,10 @@ func normalizeProxyKey(namespace, key string) string {
 	if len(parts) != 3 {
 		return key
 	}
-	if parts[0] != namespace {
+	if _, err := strconv.Atoi(parts[1]); err != nil {
 		return key
 	}
-	if _, err := strconv.Atoi(parts[1]); err != nil {
+	if namespace != "" && parts[0] != namespace {
 		return key
 	}
 	return parts[2]
@@ -94,7 +94,7 @@ func (s *service) Prepare(ctx context.Context, pr *snapshotsapi.PrepareSnapshotR
 
 	log.G(ctx).WithFields(log.Fields{
 		"namespace":   ns,
-		"key":         pr.Key,
+		"key":         key,
 		"mount_count": len(mounts),
 	}).Debug("grpc: prepare succeeded")
 
@@ -133,16 +133,15 @@ func (s *service) Mounts(ctx context.Context, mr *snapshotsapi.MountsRequest) (*
 }
 
 func (s *service) Commit(ctx context.Context, cr *snapshotsapi.CommitSnapshotRequest) (*ptypes.Empty, error) {
-	// Log immediately at handler entry to diagnose if we're even reaching here
-	log.L.WithFields(log.Fields{
-		"name": cr.Name,
-		"key":  cr.Key,
-	}).Debug("grpc: commit handler entry")
-
 	ns, _ := namespaces.Namespace(ctx)
 	name := normalizeProxyKey(ns, cr.Name)
 	key := normalizeProxyKey(ns, cr.Key)
 	parent := normalizeProxyKey(ns, cr.Parent)
+	// Log immediately at handler entry to diagnose if we're even reaching here
+	log.L.WithFields(log.Fields{
+		"name": name,
+		"key":  key,
+	}).Debug("grpc: commit handler entry")
 	log.G(ctx).WithFields(log.Fields{
 		"namespace": ns,
 		"name":      name,
