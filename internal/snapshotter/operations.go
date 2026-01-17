@@ -37,7 +37,7 @@ func isExtractKey(key string) bool {
 // The marker file is checked by erofs.MountsToLayer() in the EROFS differ
 // to validate that a directory is a genuine EROFS snapshotter layer.
 func ensureMarkerFile(path string) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		if os.IsExist(err) {
 			return nil // File already exists

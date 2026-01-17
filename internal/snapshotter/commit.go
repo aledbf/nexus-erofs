@@ -104,7 +104,7 @@ func (s *snapshotter) generateFsMeta(ctx context.Context, parentIDs []string) {
 	}
 
 	// Atomic lock file creation - only one goroutine wins
-	lockFd, err := os.OpenFile(lockFile, os.O_CREATE|os.O_EXCL, 0600)
+	lockFd, err := os.OpenFile(lockFile, os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		// Another goroutine is generating or lock file is stale
 		// Check if final file exists now (generation completed while we waited)
@@ -233,7 +233,7 @@ func fixVmdkPaths(vmdkFile, oldPath, newPath string) error {
 	// Simple string replacement - the VMDK format uses quoted paths
 	fixed := strings.ReplaceAll(string(content), oldPath, newPath)
 
-	if err := os.WriteFile(vmdkFile, []byte(fixed), 0644); err != nil {
+	if err := os.WriteFile(vmdkFile, []byte(fixed), 0o644); err != nil {
 		return fmt.Errorf("write vmdk: %w", err)
 	}
 
@@ -263,7 +263,7 @@ func (s *snapshotter) writeLayerManifest(manifestFile string, blobs []string) er
 	}
 
 	content := strings.Join(lines, "\n") + "\n"
-	return os.WriteFile(manifestFile, []byte(content), 0644)
+	return os.WriteFile(manifestFile, []byte(content), 0o644)
 }
 
 // Commit finalizes an active snapshot, converting it to EROFS format.

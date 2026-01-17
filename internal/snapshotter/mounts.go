@@ -107,7 +107,7 @@ func (s *snapshotter) viewMountsForKind(snap storage.Snapshot) ([]mount.Mount, e
 	// This is rare but valid for empty base images.
 	if len(snap.ParentIDs) == 0 {
 		fsPath := s.viewLowerPath(snap.ID)
-		if err := os.MkdirAll(fsPath, 0755); err != nil {
+		if err := os.MkdirAll(fsPath, 0o755); err != nil {
 			return nil, fmt.Errorf("create view fs directory: %w", err)
 		}
 		return []mount.Mount{

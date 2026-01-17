@@ -88,7 +88,7 @@ func TestFindLayerBlobNotFound(t *testing.T) {
 
 	// Create empty snapshot directory
 	snapshotDir := filepath.Join(root, "snapshots", "missing-blob")
-	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -120,13 +120,13 @@ func TestFindLayerBlobDigestNaming(t *testing.T) {
 
 	// Create snapshot directory with digest-based layer blob
 	snapshotDir := filepath.Join(root, "snapshots", "digest-test")
-	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create digest-named layer blob (64 hex chars for sha256)
 	digestBlob := filepath.Join(snapshotDir, "sha256-a3ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4.erofs")
-	if err := os.WriteFile(digestBlob, []byte("fake erofs"), 0644); err != nil {
+	if err := os.WriteFile(digestBlob, []byte("fake erofs"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -148,13 +148,13 @@ func TestFindLayerBlobFallbackNaming(t *testing.T) {
 
 	// Create snapshot directory with fallback-named layer blob
 	snapshotDir := filepath.Join(root, "snapshots", "fallback-test")
-	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create fallback-named layer blob
 	fallbackBlob := filepath.Join(snapshotDir, "snapshot-fallback-test.erofs")
-	if err := os.WriteFile(fallbackBlob, []byte("fake erofs"), 0644); err != nil {
+	if err := os.WriteFile(fallbackBlob, []byte("fake erofs"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -176,7 +176,7 @@ func TestFindLayerBlobDigestPriority(t *testing.T) {
 
 	// Create snapshot directory with both naming styles
 	snapshotDir := filepath.Join(root, "snapshots", "priority-test")
-	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -185,7 +185,7 @@ func TestFindLayerBlobDigestPriority(t *testing.T) {
 	fallbackBlob := filepath.Join(snapshotDir, "snapshot-priority-test.erofs")
 
 	for _, blob := range []string{digestBlob, fallbackBlob} {
-		if err := os.WriteFile(blob, []byte("fake erofs"), 0644); err != nil {
+		if err := os.WriteFile(blob, []byte("fake erofs"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -366,7 +366,7 @@ func TestCleanupRemovesOrphanedDirectories(t *testing.T) {
 
 	// Create an orphaned directory (not in metadata)
 	orphanDir := filepath.Join(root, "snapshots", "orphan-123")
-	if err := os.MkdirAll(orphanDir, 0755); err != nil {
+	if err := os.MkdirAll(orphanDir, 0o755); err != nil {
 		t.Fatalf("create orphan dir: %v", err)
 	}
 

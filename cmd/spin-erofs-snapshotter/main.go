@@ -213,7 +213,13 @@ func run(cliCtx *cli.Context) error {
 	df := differ.NewErofsDiffer(contentStore, differOpts...)
 
 	// Create gRPC server with request logging for debugging.
-	rpc := grpc.NewServer(grpc.UnaryInterceptor(grpcLoggingInterceptor))
+	// Use both unary and stream interceptors to catch all request types.
+	// Enable verbose gRPC logging to diagnose connection issues.
+	rpc := grpc.NewServer(
+		grpc.UnaryInterceptor(grpcLoggingInterceptor),
+		grpc.StreamInterceptor(grpcStreamLoggingInterceptor),
+		grpc.MaxConcurrentStreams(1000), // Ensure we can handle many concurrent requests
+	)
 
 	// Register snapshot service (using our fixed service that supports rebase)
 	snapshotsapi.RegisterSnapshotsServer(rpc, grpcservice.FromSnapshotter(sn))
@@ -255,6 +261,15 @@ func run(cliCtx *cli.Context) error {
 	return nil
 }
 
+func grpcStreamLoggingInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	log.G(ss.Context()).WithFields(log.Fields{
+		"method":         info.FullMethod,
+		"isClientStream": info.IsClientStream,
+		"isServerStream": info.IsServerStream,
+	}).Info("grpc: STREAM request received")
+	return handler(srv, ss)
+}
+
 func grpcLoggingInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
 	fields := log.Fields{
 		"method": info.FullMethod,
@@ -265,27 +280,14 @@ func grpcLoggingInterceptor(ctx context.Context, req interface{}, info *grpc.Una
 		}
 	}
 
-	// Log Commit at Info level to ensure visibility (debugging parallel unpack issues)
-	if strings.HasSuffix(info.FullMethod, "/Commit") {
-		log.G(ctx).WithFields(fields).Info("grpc: COMMIT request received")
-	} else {
-		log.G(ctx).WithFields(fields).Debug("grpc: request received")
-	}
+	// Log ALL requests at Info level to diagnose missing Commit issue
+	log.G(ctx).WithFields(fields).Info("grpc: request received")
 
 	resp, err := handler(ctx, req)
 	if err != nil {
-		if strings.HasSuffix(info.FullMethod, "/Commit") {
-			log.G(ctx).WithFields(fields).WithError(err).Warn("grpc: COMMIT request failed")
-		} else {
-			log.G(ctx).WithFields(fields).WithError(err).Debug("grpc: request failed")
-		}
+		log.G(ctx).WithFields(fields).WithError(err).Warn("grpc: request failed")
 		return resp, err
 	}
-
-	if strings.HasSuffix(info.FullMethod, "/Commit") {
-		log.G(ctx).WithFields(fields).Info("grpc: COMMIT request completed")
-	} else {
-		log.G(ctx).WithFields(fields).Debug("grpc: request completed")
-	}
+	log.G(ctx).WithFields(fields).Info("grpc: request completed")
 	return resp, nil
 }

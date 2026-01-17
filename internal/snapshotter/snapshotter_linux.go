@@ -263,7 +263,7 @@ func (s *snapshotter) mountBlockRwLayer(ctx context.Context, id string) error {
 	rwMountPath := s.blockRwMountPath(id)
 
 	// Create mount point
-	if err := os.MkdirAll(rwMountPath, 0755); err != nil {
+	if err := os.MkdirAll(rwMountPath, 0o755); err != nil {
 		return fmt.Errorf("failed to create rw mount point: %w", err)
 	}
 
@@ -281,12 +281,12 @@ func (s *snapshotter) mountBlockRwLayer(ctx context.Context, id string) error {
 	upperDir := s.blockUpperPath(id)
 	workDir := filepath.Join(s.blockRwMountPath(id), "work")
 
-	if err := os.MkdirAll(upperDir, 0755); err != nil {
+	if err := os.MkdirAll(upperDir, 0o755); err != nil {
 		// Cleanup mount on failure
 		_ = unmountAll(rwMountPath)
 		return fmt.Errorf("failed to create upper directory: %w", err)
 	}
-	if err := os.MkdirAll(workDir, 0755); err != nil {
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		_ = unmountAll(rwMountPath)
 		return fmt.Errorf("failed to create work directory: %w", err)
 	}
